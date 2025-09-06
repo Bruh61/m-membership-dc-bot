@@ -1,0 +1,8 @@
+{
+  "adminRoleId": "596039273275457556",
+  "logChannelId": "1404813810598023311",
+  "checkIntervalMinutes": 5,
+  "warnThresholdDays": 5,
+  "backupRetention": 20,
+  "timezone": "Europe/Berlin"
+}
