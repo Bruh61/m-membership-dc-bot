@@ -4,6 +4,7 @@ const path = require('path');
 
 const BACKUP_DIR = path.join(process.cwd(), 'backups');
 const DATA_DIR = path.join(process.cwd(), 'data');
+const MAX_BACKUPS = 3; // <= nur 3 Backups behalten
 
 function ensureDirs() {
     if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
@@ -15,16 +16,26 @@ function daysToMs(d) { return d * 24 * 60 * 60 * 1000; }
 function sleep(ms) { return new Promise(res => setTimeout(res, ms)); }
 
 function backup() {
+    ensureDirs();
+
     const src = path.join(DATA_DIR, 'temproles.json');
+    if (!fs.existsSync(src)) return;
+
+    // neues Backup anlegen
     const ts = new Date();
-    const stamp = ts.toISOString().replace(/[-:]/g, '').split('.')[0];
+    const stamp = ts.toISOString().replace(/[-:]/g, '').split('.')[0]; // YYYYMMDDTHHMMSS
     const dst = path.join(BACKUP_DIR, `temproles-${stamp}.json`);
-    if (fs.existsSync(src)) fs.copyFileSync(src, dst);
-    const files = fs.readdirSync(BACKUP_DIR).filter(f => f.startsWith('temproles-')).sort();
-    const max = require('../../config.json').backupRetention || 20;
-    while (files.length > max) {
+    fs.copyFileSync(src, dst);
+
+    // nur temproles-*.json zählen und nach Name sortieren (älteste zuerst)
+    const files = fs.readdirSync(BACKUP_DIR)
+        .filter(f => f.startsWith('temproles-') && f.endsWith('.json'))
+        .sort();
+
+    // auf MAX_BACKUPS heruntertrimmen (älteste löschen)
+    while (files.length > MAX_BACKUPS) {
         const f = files.shift();
-        try { fs.unlinkSync(path.join(BACKUP_DIR, f)); } catch { }
+        try { fs.unlinkSync(path.join(BACKUP_DIR, f)); } catch { /* ignore */ }
     }
 }
 
@@ -60,4 +71,13 @@ function validateSchema(obj) {
     return true;
 }
 
-module.exports = { ensureDirs, toUnix, daysToMs, backupAndSave, backupAndSaveFromRaw, ensureManageable, validateSchema, sleep };
+module.exports = {
+    ensureDirs,
+    toUnix,
+    daysToMs,
+    backupAndSave,
+    backupAndSaveFromRaw,
+    ensureManageable,
+    validateSchema,
+    sleep
+};
