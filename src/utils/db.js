@@ -1,13 +1,25 @@
-// --- file: src/utils/db.js
+// src/utils/db.js
 const fs = require('fs');
 const path = require('path');
 
 const DB_PATH = path.join(process.cwd(), 'data', 'temproles.json');
 
+function _empty() {
+    return { guildId: process.env.GUILD_ID, members: {}, customRoles: {} };
+}
+
 function _load() {
-    if (!fs.existsSync(DB_PATH)) return { guildId: process.env.GUILD_ID, members: {} };
+    if (!fs.existsSync(DB_PATH)) return _empty();
     const raw = fs.readFileSync(DB_PATH, 'utf8');
-    try { return JSON.parse(raw); } catch { return { guildId: process.env.GUILD_ID, members: {} }; }
+    try {
+        const parsed = JSON.parse(raw);
+        // Backward compatible
+        if (!parsed.customRoles) parsed.customRoles = {};
+        if (!parsed.members) parsed.members = {};
+        return parsed;
+    } catch {
+        return _empty();
+    }
 }
 
 let cache = _load();
@@ -21,6 +33,8 @@ function save() {
 module.exports = {
     get data() { return cache; },
     replace(obj) { cache = obj; save(); },
+
+    // --- Temp roles (existing) ---
     addEntry(guildId, userId, roleId, grantedAt, expiresAt) {
         if (!cache.members[userId]) cache.members[userId] = [];
         cache.members[userId].push({ roleId, grantedAt, expiresAt, warned5d: false });
@@ -63,5 +77,23 @@ module.exports = {
         }
         out.sort((a, b) => new Date(a.expiresAt) - new Date(b.expiresAt));
         return out;
-    }
+    },
+
+    // --- Custom roles (new) ---
+    getCustomRole(userId) {
+        return cache.customRoles[userId] || null;
+    },
+    setCustomRole(userId, roleId, createdAtISO) {
+        cache.customRoles[userId] = { roleId, createdAt: createdAtISO };
+        save();
+    },
+    removeCustomRole(userId) {
+        const existed = !!cache.customRoles[userId];
+        delete cache.customRoles[userId];
+        save();
+        return existed;
+    },
+    listCustomRoles() {
+        return Object.entries(cache.customRoles).map(([userId, v]) => ({ userId, ...v }));
+    },
 };

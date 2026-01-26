@@ -4,5 +4,18 @@
   "checkIntervalMinutes": 5,
   "warnThresholdDays": 5,
   "backupRetention": 20,
-  "timezone": "Europe/Berlin"
+  "timezone": "Europe/Berlin",
+
+  "membershipRoleIds": {
+    "bronze": "1354721641921511444",
+    "silver": "1354723294636671226",
+    "gold": "1354723681959673917",
+    "diamond": "1354723814184976419"
+  },
+  "customRoleAllowedTiers": ["silver", "gold", "diamond"],
+  "customRole": {
+    "anchorRoleId": "1364963140898652272",
+    "namePrefix": "",
+    "deleteRoleOnRevoke": true
+  }
 }

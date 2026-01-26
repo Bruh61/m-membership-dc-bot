@@ -41,12 +41,13 @@ const {
     ModalBuilder,
     TextInputBuilder,
     TextInputStyle,
+    PermissionFlagsBits,
 } = require('discord.js');
 
 const config = require('./config.json');
 const db = require('./src/utils/db');
 const { ensureDirs, toUnix, ensureManageable } = require('./src/utils/helpers');
-const { revokeExpiredRoles, sendFiveDayWarnings } = require('./src/utils/scheduler');
+const { revokeExpiredRoles, sendFiveDayWarnings, revokeInvalidCustomRoles } = require('./src/utils/scheduler');
 
 // Commands, die wir programmatic aufrufen (Buttons/Modal)
 const giveCmd = require('./src/commands/give-temp-role');
@@ -64,21 +65,62 @@ const client = new Client({
 
 client.commands = new Collection();
 
-// Commands dynamisch laden
+// --------------------
+// Event Loader (src/events/*.js)
+// --------------------
+function loadEvents(clientInstance) {
+    const eventsPath = path.join(__dirname, 'src', 'events');
+    if (!fs.existsSync(eventsPath)) {
+        console.log('[EVENTS] Kein src/events Ordner gefunden – überspringe Event-Loading.');
+        return;
+    }
+
+    const files = fs.readdirSync(eventsPath).filter(f => f.endsWith('.js'));
+    for (const file of files) {
+        const event = require(path.join(eventsPath, file));
+        if (!event?.name || typeof event.execute !== 'function') {
+            console.warn(`[EVENTS] Ungültiges Event-File übersprungen: ${file}`);
+            continue;
+        }
+
+        // optional: event.once support
+        if (event.once) {
+            clientInstance.once(event.name, (...args) => event.execute(...args, clientInstance));
+        } else {
+            clientInstance.on(event.name, (...args) => event.execute(...args, clientInstance));
+        }
+
+        console.log(`[EVENTS] Loaded: ${event.name} (${file})`);
+    }
+}
+loadEvents(client);
+
+// --------------------
+// Commands Loader (src/commands/*.js)
+// --------------------
 const commandsPath = path.join(__dirname, 'src', 'commands');
 for (const file of fs.readdirSync(commandsPath)) {
     if (!file.endsWith('.js')) continue;
     const command = require(path.join(commandsPath, file));
+    if (!command?.data?.name || typeof command.execute !== 'function') {
+        console.warn(`[CMDS] Ungültiges Command-File übersprungen: ${file}`);
+        continue;
+    }
     client.commands.set(command.data.name, command);
 }
 
 client.once('ready', async () => {
     console.log(`Logged in as ${client.user.tag}`);
-    await revokeExpiredRoles(client);
-    await sendFiveDayWarnings(client);
 
+    // 1) Direkt beim Start ausführen
+    await revokeExpiredRoles(client).catch(console.error);
+    await sendFiveDayWarnings(client).catch(console.error);
+    await revokeInvalidCustomRoles(client).catch(console.error);
+
+    // 2) Regelmäßig ausführen (Fallback)
     const ms = config.checkIntervalMinutes * 60 * 1000;
     setInterval(() => revokeExpiredRoles(client).catch(console.error), ms);
+    setInterval(() => revokeInvalidCustomRoles(client).catch(console.error), ms);
     setInterval(() => sendFiveDayWarnings(client).catch(console.error), 60 * 60 * 1000);
 });
 
@@ -166,17 +208,11 @@ client.on('interactionCreate', async (interaction) => {
                     const page = Number(parts[4]);
                     const newPage = dir === 'prev' ? page - 1 : page + 1;
 
-                    // Wir bauen hier die Seite nicht neu (das erledigt der Command selbst),
-                    // sondern triggern einfach ein Re-render per Datenbasis.
-                    // Für Einfachheit laden wir die Einträge und bauen die Embed/Buttons analog zum Command.
                     const entries = loadEntriesFromJson();
                     const PAGE_SIZE = 3;
                     const totalPages = Math.max(1, Math.ceil(entries.length / PAGE_SIZE));
                     const clamped = Math.min(Math.max(newPage, 0), totalPages - 1);
 
-                    // Wir rufen hier NICHT buildPage aus dem Command, um Kopplung zu vermeiden.
-                    // Der Command selbst liefert bei initialer Ausführung die gleiche Struktur.
-                    // (Wenn du willst, können wir das auf eine shared Utility auslagern.)
                     const start = clamped * PAGE_SIZE;
                     const items = entries.slice(start, start + PAGE_SIZE);
 
@@ -269,11 +305,9 @@ client.on('interactionCreate', async (interaction) => {
                 const action = parts[4];
 
                 if (action === 'remove') {
-                    // Permissions/Manageability prüfen wie in Commands
                     const role = await interaction.guild.roles.fetch(roleId);
                     await ensureManageable(interaction.guild, role, interaction);
 
-                    // Programmatic Call auf Command-API
                     if (removeCmd.removeTempRole) {
                         await removeCmd.removeTempRole({
                             guild: interaction.guild,

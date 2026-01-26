@@ -1,10 +1,68 @@
 // --- file: src/utils/helpers.js
 const fs = require('fs');
 const path = require('path');
+const { PermissionFlagsBits } = require('discord.js');
+const config = require('../../config.json');
 
 const BACKUP_DIR = path.join(process.cwd(), 'backups');
 const DATA_DIR = path.join(process.cwd(), 'data');
-const MAX_BACKUPS = 3; // <= nur 3 Backups behalten
+
+// Best practice: aus config ziehen, fallback wenn nicht vorhanden
+const MAX_BACKUPS = Number.isFinite(config?.backupRetention)
+    ? Math.max(1, config.backupRetention)
+    : 3;
+
+const DEFAULT_BANNED_WORDS = [
+    'hurensohn', 'huso', 'wichser', 'fotze', 'f*otze', 'arschloch',
+    'nazi', 'hitler', 'kys', 'verrecke', 'spast', 'spasti',
+    'bastard', 'missgeburt', 'schlampe'
+];
+
+function normalizeForFilter(s) {
+    return String(s || '')
+        .toLowerCase()
+        .normalize('NFKD')
+        .replace(/[\u0300-\u036f]/g, '')       // accents
+        .replace(/[^a-z0-9]/g, '');           // remove separators/specials
+}
+
+function containsBannedWord(name, extraBannedWords = []) {
+    const clean = normalizeForFilter(name);
+    const list = [...DEFAULT_BANNED_WORDS, ...extraBannedWords].map(normalizeForFilter);
+    return list.some(w => w && clean.includes(w));
+}
+
+// Zusätzliche „Missbrauch“-Checks: mentions, links, zu viele Sonderzeichen
+function validateRoleName(rawName, { min = 2, max = 50, bannedWords = [] } = {}) {
+    const name = String(rawName || '').trim();
+
+    if (name.length < min || name.length > max) {
+        return { ok: false, reason: `Name muss ${min}–${max} Zeichen lang sein.` };
+    }
+
+    const lower = name.toLowerCase();
+
+    if (lower.includes('@everyone') || lower.includes('@here')) {
+        return { ok: false, reason: 'Name darf keine Mass-Mentions enthalten (@everyone/@here).' };
+    }
+
+    // simple link detection
+    if (/(https?:\/\/|www\.)/i.test(name)) {
+        return { ok: false, reason: 'Name darf keine Links enthalten.' };
+    }
+
+    // optional: nur bestimmte Zeichen erlauben (lockerer Ansatz)
+    // erlaubt Buchstaben/Zahlen/Leerzeichen sowie ._-•| und ein paar Emoji
+    if (!/^[\p{L}\p{N}\p{Zs}._\-•|#&()]+$/u.test(name)) {
+        return { ok: false, reason: 'Name enthält unzulässige Zeichen.' };
+    }
+
+    if (containsBannedWord(name, bannedWords)) {
+        return { ok: false, reason: 'Name enthält unzulässige/beleidigende Begriffe.' };
+    }
+
+    return { ok: true, name };
+}
 
 function ensureDirs() {
     if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
@@ -49,25 +107,112 @@ function backupAndSaveFromRaw(raw) {
     fs.renameSync(tmp, file);
 }
 
+/**
+ * Prüft ob der Bot die Rolle verwalten kann (ManageRoles + Hierarchie).
+ */
 async function ensureManageable(guild, role, interaction) {
     const me = guild.members.me || await guild.members.fetchMe();
-    if (!me.permissions.has('ManageRoles')) throw new Error('Bot benötigt ManageRoles.');
+
+    if (!me.permissions.has(PermissionFlagsBits.ManageRoles)) {
+        throw new Error('Bot benötigt ManageRoles.');
+    }
+
     if (me.roles.highest.comparePositionTo(role) <= 0) {
-        await interaction.reply({ content: 'Ich kann diese Rolle nicht verwalten (Rollen-Hierarchie).', ephemeral: true });
+        if (interaction?.reply) {
+            await interaction.reply({
+                content: 'Ich kann diese Rolle nicht verwalten (Rollen-Hierarchie).',
+                ephemeral: true
+            }).catch(() => { });
+        }
         throw new Error('Role not manageable');
     }
 }
 
+/**
+ * Prüft ob ein Member irgendeine Rolle aus roleIds besitzt.
+ * roleIds Format: { key: "roleId", ... }
+ */
+function hasAnyMembershipRole(member, roleIds) {
+    if (!member?.roles?.cache || !roleIds || typeof roleIds !== 'object') return false;
+    const ids = Object.values(roleIds).filter(Boolean);
+    return ids.some(id => member.roles.cache.has(id));
+}
+
+/**
+ * Wählt nur bestimmte Tiers aus einem membershipRoleIds-Objekt
+ * Beispiel: pickRoleIdsByTier(allIds, ['silver','gold','diamond'])
+ */
+function pickRoleIdsByTier(allRoleIds, allowedTiers) {
+    const out = {};
+    for (const tier of allowedTiers || []) {
+        const id = allRoleIds?.[tier];
+        if (id) out[tier] = id;
+    }
+    return out;
+}
+
+/**
+ * Liefert exakt die erlaubten Role-IDs für Custom-Roles, basierend auf config:
+ * - config.membershipRoleIds (enthält auch bronze)
+ * - config.customRoleAllowedTiers (z.B. ['silver','gold','diamond'])
+ */
+function getAllowedCustomRoleIds(cfg) {
+    const allowedTiers = Array.isArray(cfg?.customRoleAllowedTiers)
+        ? cfg.customRoleAllowedTiers
+        : ['silver', 'gold', 'diamond'];
+
+    return pickRoleIdsByTier(cfg?.membershipRoleIds || {}, allowedTiers);
+}
+
+/**
+ * Validiert #RRGGBB oder RRGGBB
+ */
+function isValidHexColor(input) {
+    if (typeof input !== 'string') return false;
+    return /^#?[0-9A-Fa-f]{6}$/.test(input.trim());
+}
+
+/**
+ * Normalisiert zu #RRGGBB
+ */
+function normalizeHexColor(input) {
+    const v = String(input).trim();
+    return v.startsWith('#') ? v : `#${v}`;
+}
+
+/**
+ * Platziert eine Rolle direkt unter der Anchor-Rolle (also niedrigere Position).
+ */
+async function placeRoleBelowAnchor(guild, role, anchorRoleId) {
+    if (!anchorRoleId) throw new Error('anchorRoleId fehlt.');
+    const anchor = await guild.roles.fetch(anchorRoleId).catch(() => null);
+    if (!anchor) throw new Error('Anchor-Rolle nicht gefunden.');
+
+    const targetPos = Math.max(1, anchor.position - 1);
+    await role.setPosition(targetPos).catch((e) => {
+        throw new Error(`Konnte Rolle nicht positionieren: ${e?.message ?? e}`);
+    });
+}
+
+/**
+ * Schema-Check für temproles.json (backward compatible: customRoles optional)
+ */
 function validateSchema(obj) {
     if (!obj || typeof obj !== 'object') return false;
     if (!obj.members || typeof obj.members !== 'object') return false;
+
     for (const [uid, list] of Object.entries(obj.members)) {
+        if (typeof uid !== 'string') return false;
         if (!Array.isArray(list)) return false;
+
         for (const entry of list) {
+            if (!entry || typeof entry !== 'object') return false;
             if (typeof entry.roleId !== 'string') return false;
             if (!entry.grantedAt || !entry.expiresAt) return false;
         }
     }
+
+    if (obj.customRoles && typeof obj.customRoles !== 'object') return false;
     return true;
 }
 
@@ -79,5 +224,16 @@ module.exports = {
     backupAndSaveFromRaw,
     ensureManageable,
     validateSchema,
-    sleep
+    sleep,
+
+    hasAnyMembershipRole,
+    pickRoleIdsByTier,
+    getAllowedCustomRoleIds,
+
+    isValidHexColor,
+    normalizeHexColor,
+    placeRoleBelowAnchor,
+
+    containsBannedWord,
+    validateRoleName,
 };

@@ -1,27 +1,37 @@
 // src/commands/memberships.js
 const { SlashCommandBuilder, EmbedBuilder } = require('discord.js');
+const config = require('../../config.json');
 
-const ROLE_IDS = {
+const FALLBACK_ROLE_IDS = {
     bronze: '1354721641921511444',
     silver: '1354723294636671226',
     gold: '1354723681959673917',
     diamond: '1354723814184976419',
 };
 
+function getRoleIds() {
+    const fromConfig = config?.membershipRoleIds;
+    if (fromConfig && typeof fromConfig === 'object') {
+        return { ...FALLBACK_ROLE_IDS, ...fromConfig };
+    }
+    return FALLBACK_ROLE_IDS;
+}
+
 module.exports = {
     data: new SlashCommandBuilder()
         .setName('memberships')
         .setDescription('Zeigt die Membership-Rollen und ihre Vorteile'),
     async execute(interaction) {
-        const r = ROLE_IDS;
+        const r = getRoleIds();
+
         const roleLine = (id, fallbackName) => {
-            const name = interaction.guild.roles.cache.get(id)?.name || fallbackName;
+            const role = interaction.guild.roles.cache.get(id);
+            const name = role?.name || fallbackName;
             return `<@&${id}> | ${name}`;
         };
 
         const embeds = [];
 
-        // 0) Kopf / Hinweise
         embeds.push(
             new EmbedBuilder()
                 .setTitle('❤️ Unterstützung & Hinweise')
@@ -38,7 +48,6 @@ module.exports = {
                 )
         );
 
-        // 1) Bronze
         embeds.push(
             new EmbedBuilder()
                 .setTitle('🥉 Bronze Tier – Supporter')
@@ -56,7 +65,6 @@ module.exports = {
                 )
         );
 
-        // 2) Silver
         embeds.push(
             new EmbedBuilder()
                 .setTitle('🥈 Silver Tier – Enthusiast')
@@ -76,7 +84,6 @@ module.exports = {
                 )
         );
 
-        // 3) Gold
         embeds.push(
             new EmbedBuilder()
                 .setTitle('🥇 Gold Tier – VIP Member')
@@ -92,7 +99,6 @@ module.exports = {
                 )
         );
 
-        // 4) Diamond
         embeds.push(
             new EmbedBuilder()
                 .setTitle('💎 Diamond Tier – Ultimate Supporter')
@@ -112,7 +118,6 @@ module.exports = {
                 )
         );
 
-        // öffentlich posten (nicht ephemeral). Wenn du es privat willst -> ephemeral: true
         await interaction.reply({ embeds, ephemeral: true });
     }
 };

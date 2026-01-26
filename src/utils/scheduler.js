@@ -1,7 +1,48 @@
-// --- file: src/utils/scheduler.js
-const db = require('./db');
+// src/utils/scheduler.js (ERGÄNZEN)
 const config = require('../../config.json');
-const { sleep } = require('./helpers');
+const db = require('./db');
+const { getAllowedCustomRoleIds, hasAnyMembershipRole, sleep } = require('./helpers');
+
+async function revokeInvalidCustomRoles(client) {
+    const guild = await client.guilds.fetch(process.env.GUILD_ID);
+    const g = await guild.fetch();
+
+    const allowedIds = getAllowedCustomRoleIds(config);
+    const items = db.listCustomRoles();
+
+    for (const it of items) {
+        const member = await g.members.fetch(it.userId).catch(() => null);
+        const role = it.roleId ? g.roles.cache.get(it.roleId) : null;
+
+        // Member weg -> cleanup
+        if (!member) {
+            if (role && config.customRole?.deleteRoleOnRevoke) {
+                await role.delete('Custom role cleanup (member left)').catch(() => { });
+            }
+            db.removeCustomRole(it.userId);
+            continue;
+        }
+
+        // allowed membership fehlt -> revoke
+        const ok = hasAnyMembershipRole(member, allowedIds);
+        if (!ok) {
+            if (role && member.roles.cache.has(role.id)) {
+                await member.roles.remove(role, 'Allowed membership missing -> revoke custom role').catch(() => { });
+            }
+            if (role && config.customRole?.deleteRoleOnRevoke) {
+                await role.delete('Allowed membership missing -> delete custom role').catch(() => { });
+            }
+            db.removeCustomRole(it.userId);
+
+            const ch = g.channels.cache.get(config.logChannelId);
+            if (ch && ch.isTextBased()) {
+                ch.send(`🧹 Custom-Rolle entfernt (Scheduler): <@${it.userId}>`).catch(() => { });
+            }
+
+            await sleep(200);
+        }
+    }
+}
 
 async function revokeExpiredRoles(client) {
     const guild = await client.guilds.fetch(process.env.GUILD_ID);
@@ -46,4 +87,4 @@ async function sendFiveDayWarnings(client) {
     }
 }
 
-module.exports = { revokeExpiredRoles, sendFiveDayWarnings };
+module.exports = { revokeExpiredRoles, sendFiveDayWarnings, revokeInvalidCustomRoles };
