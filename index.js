@@ -55,6 +55,8 @@ const removeCmd = require('./src/commands/remove-temp-role');
 
 ensureDirs();
 
+const DEFAULT_EXTEND_DAYS = 30;   // Standard-Verlängerung
+
 const client = new Client({
     intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMembers],
     partials: [Partials.GuildMember],
@@ -201,8 +203,8 @@ client.on('interactionCreate', async (interaction) => {
                                     .setLabel('Entfernen')
                                     .setStyle(ButtonStyle.Danger),
                                 new ButtonBuilder()
-                                    .setCustomId(`troles|${interaction.guild.id}|${e.userId}|${e.roleId}|extend|7`)
-                                    .setLabel(`+7 Tage`)
+                                    .setCustomId(`troles|${interaction.guild.id}|${e.userId}|${e.roleId}|extend|${DEFAULT_EXTEND_DAYS}`)
+                                    .setLabel(`+${DEFAULT_EXTEND_DAYS} Tage`)
                                     .setStyle(ButtonStyle.Primary),
                                 new ButtonBuilder()
                                     .setCustomId(`troles|${interaction.guild.id}|${e.userId}|add|${e.roleId}`)
