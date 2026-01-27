@@ -164,6 +164,16 @@ function getAllowedCustomRoleIds(cfg) {
     return pickRoleIdsByTier(cfg?.membershipRoleIds || {}, allowedTiers);
 }
 
+function getAllowedCustomRoleIdsLocal(cfg) {
+    // Erwartet: cfg.customRole.allowedMembershipRoleIds (Array)
+    // Fallback: cfg.membershipRoleIds (Object mit tier->roleId)
+    const a = cfg?.customRole?.allowedMembershipRoleIds;
+    if (Array.isArray(a) && a.length) return a.filter(Boolean);
+
+    const idsObj = cfg?.membershipRoleIds || {};
+    return Object.values(idsObj).filter(Boolean);
+}
+
 /**
  * Validiert #RRGGBB oder RRGGBB
  */
@@ -216,20 +226,20 @@ function validateSchema(obj) {
     return true;
 }
 function getMembershipTier(member, roleIds) {
-  if (!member?.roles?.cache || !roleIds || typeof roleIds !== 'object') return null;
-  const order = ['diamond', 'gold', 'silver', 'bronze'];
-  for (const t of order) {
-    const id = roleIds?.[t];
-    if (id && member.roles.cache.has(id)) return t;
-  }
-  return null;
+    if (!member?.roles?.cache || !roleIds || typeof roleIds !== 'object') return null;
+    const order = ['diamond', 'gold', 'silver', 'bronze'];
+    for (const t of order) {
+        const id = roleIds?.[t];
+        if (id && member.roles.cache.has(id)) return t;
+    }
+    return null;
 }
 
 function getCustomRoleShareLimit(cfg, tier) {
-  const map = cfg?.customRoleSharing?.maxSharesByTier;
-  const n = map?.[tier];
-  const limit = Number.isFinite(n) ? n : 0;
-  return Math.max(0, limit);
+    const map = cfg?.customRoleSharing?.maxSharesByTier;
+    const n = map?.[tier];
+    const limit = Number.isFinite(n) ? n : 0;
+    return Math.max(0, limit);
 }
 
 
@@ -256,4 +266,5 @@ module.exports = {
 
     getMembershipTier,
     getCustomRoleShareLimit,
+    getAllowedCustomRoleIdsLocal,
 };
