@@ -1,18 +1,42 @@
 // --- file: src/commands/my-temp-roles.js
-const { SlashCommandBuilder: SDB5, EmbedBuilder: EB5 } = require('discord.js');
-const db6 = require('../utils/db');
-const { toUnix: tUnix5 } = require('../utils/helpers');
+const {
+  SlashCommandBuilder,
+  EmbedBuilder,
+  MessageFlags,
+} = require('discord.js');
+
+const db = require('../utils/db');
+const { toUnix } = require('../utils/helpers');
+
+function getUserEntriesFallback(guildId, userId) {
+  // bevorzugt: db.getUser falls vorhanden
+  if (typeof db.getUser === 'function') return db.getUser(guildId, userId) || [];
+
+  // fallback: direkt aus db.data.members lesen
+  const members = db?.data?.members || {};
+  const entries = members[userId];
+  return Array.isArray(entries) ? entries : [];
+}
 
 module.exports = {
-  data: new SDB5()
+  data: new SlashCommandBuilder()
     .setName('my-temp-roles')
-    .setDescription('Zeigt deine aktiven temporären Rollen (ephemeral)')
-    ,
+    .setDescription('Zeigt deine aktiven temporären Rollen (ephemeral)'),
   async execute(interaction) {
     const userId = interaction.user.id;
-    const entries = db6.getUser(process.env.GUILD_ID, userId);
 
-    const embed = new EB5()
+    // hol Einträge robust
+    const allEntries = getUserEntriesFallback(process.env.GUILD_ID, userId);
+
+    // optional: nur aktive Rollen anzeigen
+    const now = Date.now();
+    const entries = (allEntries || []).filter(e => {
+      if (!e?.expiresAt) return true; // wenn kein expiry vorhanden, trotzdem anzeigen
+      const t = new Date(e.expiresAt).getTime();
+      return Number.isFinite(t) ? t > now : true;
+    });
+
+    const embed = new EmbedBuilder()
       .setTitle('Deine temporären Rollen')
       .setColor(0x5865F2)
       .setTimestamp(new Date());
@@ -20,9 +44,22 @@ module.exports = {
     if (!entries || entries.length === 0) {
       embed.setDescription('Du hast aktuell keine temporären Rollen.');
     } else {
-      embed.setDescription(entries.map(e => `• **${(interaction.guild.roles.cache.get(e.roleId)?.name) || 'Unbekannte Rolle'}** — Start: <t:${tUnix5(e.grantedAt)}:f> — Ende: <t:${tUnix5(e.expiresAt)}:f> (<t:${tUnix5(e.expiresAt)}:R>)`).join('\n'));
+      embed.setDescription(
+        entries
+          .map(e => {
+            const roleName =
+              interaction.guild.roles.cache.get(e.roleId)?.name || 'Unbekannte Rolle';
+
+            const start = e.grantedAt ? `<t:${toUnix(e.grantedAt)}:f>` : '–';
+            const endAbs = e.expiresAt ? `<t:${toUnix(e.expiresAt)}:f>` : '–';
+            const endRel = e.expiresAt ? ` (<t:${toUnix(e.expiresAt)}:R>)` : '';
+
+            return `• **${roleName}** — Start: ${start} — Ende: ${endAbs}${endRel}`;
+          })
+          .join('\n')
+      );
     }
 
-    await interaction.reply({ embeds: [embed], ephemeral: true });
-  }
+    await interaction.reply({ embeds: [embed], flags: MessageFlags.Ephemeral });
+  },
 };
