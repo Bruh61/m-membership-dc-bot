@@ -1,11 +1,13 @@
 // src/commands/customrole.js
-const { SlashCommandBuilder } = require('discord.js');
+const { SlashCommandBuilder, PermissionsBitField } = require('discord.js');
 const config = require('../../config.json');
 const db = require('../utils/db');
 
 const {
     getAllowedCustomRoleIds,
     hasAnyMembershipRole,
+    getMembershipTier,
+    getCustomRoleShareLimit,
     isValidHexColor,
     normalizeHexColor,
     placeRoleBelowAnchor,
@@ -74,7 +76,26 @@ module.exports = {
                 .addStringOption(o =>
                     o.setName('farbe2').setDescription('Farbe 2 als Hex (optional -> Farbverlauf)').setRequired(false)
                 )
-        ),
+        )
+        .addSubcommand(sc =>
+            sc.setName('my-membership')
+                .setDescription('Zeigt deine Custom-Rolle und ggf. geteilte User')
+        )
+        .addSubcommand(sc =>
+            sc.setName('give-customrole')
+                .setDescription('Teilt deine Custom-Rolle mit einem User (nur Gold/Diamond)')
+                .addUserOption(o =>
+                    o.setName('user').setDescription('User der deine Custom-Rolle bekommen soll').setRequired(true)
+                )
+        )
+        .addSubcommand(sc =>
+            sc.setName('remove-customrole')
+                .setDescription('Entfernt deine geteilte Custom-Rolle bei einem User')
+                .addUserOption(o =>
+                    o.setName('user').setDescription('User bei dem die Rolle entfernt wird').setRequired(true)
+                )
+        )
+    ,
 
     async execute(interaction) {
         const sub = interaction.options.getSubcommand();
@@ -116,8 +137,14 @@ module.exports = {
             const color1 = normalizeHexColor(color1Raw);
             const color2 = color2Raw ? normalizeHexColor(color2Raw) : null;
 
-            const anchorRoleId = config.customRole?.anchorRoleId;
-            if (!anchorRoleId) return interaction.editReply('❌ Server-Konfiguration: customRole.anchorRoleId fehlt.');
+            const tier = getMembershipTier(member, config.membershipRoleIds || {});
+            const anchorRoleId =
+                config.customRole?.anchorRoleIdsByTier?.[tier] ??
+                config.customRole?.anchorRoleId;
+
+            if (!anchorRoleId) {
+                return interaction.editReply('❌ Server-Konfiguration: customRole.anchorRoleIdsByTier (oder anchorRoleId) fehlt.');
+            }
 
             const roleName = `${config.customRole?.namePrefix ?? ''}${nameCheck.name}`;
 
@@ -125,6 +152,10 @@ module.exports = {
                 // Rolle erstellen
                 const role = await interaction.guild.roles.create({
                     name: roleName,
+                    permissions: [
+                        PermissionsBitField.Flags.Connect,
+                        PermissionsBitField.Flags.Speak,
+                    ],
                     reason: `Custom role created for ${interaction.user.tag} (${interaction.user.id})`,
                     mentionable: false,
                     hoist: false,
@@ -206,6 +237,146 @@ module.exports = {
                 console.error('customrole change-color error:', err);
                 return interaction.editReply(`❌ Fehler beim Ändern der Farben: ${err?.message ?? 'unbekannt'}`);
             }
+        }
+
+        // -------------------------
+        // /customrole my-membership
+        // -------------------------
+        if (sub === 'my-membership') {
+            const tier = getMembershipTier(member, config.membershipRoleIds || {});
+            const rec = db.getCustomRole(interaction.user.id);
+            const sharedWith = Array.isArray(rec?.sharedWith) ? rec.sharedWith : [];
+
+            const shareEligibleTiers = Array.isArray(config?.customRoleSharing?.eligibleTiers)
+                ? config.customRoleSharing.eligibleTiers
+                : ['gold', 'diamond'];
+
+            const shareLimit = getCustomRoleShareLimit(config, tier);
+            const canShare = shareEligibleTiers.includes(tier) && shareLimit > 0;
+
+            const sharedText = sharedWith.length
+                ? sharedWith.map(id => `<@${id}>`).join(', ')
+                : '—';
+
+            return interaction.editReply(
+                `👤 **Deine Membership:** ${tier ?? 'unbekannt'}\n` +
+                `🎭 **Deine Custom-Rolle:** <@&${role.id}>\n` +
+                `🤝 **Sharing:** ${canShare ? `aktiv (${sharedWith.length}/${shareLimit})` : 'nicht verfügbar'}\n` +
+                `📌 **Geteilt mit:** ${sharedText}`
+            );
+        }
+
+        // -------------------------
+        // /customrole give-customrole
+        // -------------------------
+        if (sub === 'give-customrole') {
+            const target = interaction.options.getUser('user', true);
+            if (target.id === interaction.user.id) {
+                return interaction.editReply('❌ Du kannst deine Rolle nicht mit dir selbst teilen.');
+            }
+            if (target.bot) {
+                return interaction.editReply('❌ Du kannst keine Rollen an Bots teilen.');
+            }
+
+            const tier = getMembershipTier(member, config.membershipRoleIds || {});
+            const shareEligibleTiers = Array.isArray(config?.customRoleSharing?.eligibleTiers)
+                ? config.customRoleSharing.eligibleTiers
+                : ['gold', 'diamond'];
+
+            const shareLimit = getCustomRoleShareLimit(config, tier);
+            const canShare = shareEligibleTiers.includes(tier) && shareLimit > 0;
+
+            if (!canShare) {
+                return interaction.editReply('❌ Sharing ist nur für die erlaubten Tier-Rollen verfügbar (z.B. Gold/Diamond).');
+            }
+
+            const rec = db.getCustomRole(interaction.user.id);
+            const sharedWith = Array.isArray(rec?.sharedWith) ? rec.sharedWith : [];
+
+            if (sharedWith.includes(target.id)) {
+                return interaction.editReply(`ℹ️ <@${target.id}> hat deine Custom-Rolle bereits.`);
+            }
+
+            if (sharedWith.length >= shareLimit) {
+                return interaction.editReply(`❌ Du hast dein Sharing-Limit erreicht (${sharedWith.length}/${shareLimit}).`);
+            }
+
+            // ✅ HIER kommt der Zusatz rein
+            // 🔒 Frisch aus DB lesen → verhindert >Limit (Race-safe)
+            const freshBefore = db.getCustomRole(interaction.user.id);
+            const freshBeforeShared = Array.isArray(freshBefore?.sharedWith)
+                ? Array.from(new Set(freshBefore.sharedWith))
+                : [];
+
+            if (freshBeforeShared.length >= shareLimit) {
+                return interaction.editReply(
+                    `❌ Du hast dein Sharing-Limit erreicht (${freshBeforeShared.length}/${shareLimit}).`
+                );
+            }
+
+            const targetMember = await interaction.guild.members.fetch(target.id).catch(() => null);
+            if (!targetMember) return interaction.editReply('❌ User nicht gefunden (evtl. nicht auf dem Server).');
+
+            // Rolle geben
+            await targetMember.roles.add(role, `Shared custom role from ${interaction.user.id}`).catch(err => {
+                throw err;
+            });
+
+            // DB zuerst speichern (damit Anzeige garantiert korrekt ist)
+            const addRes = db.addCustomRoleShare(interaction.user.id, target.id);
+
+            if (!addRes.ok) {
+                if (addRes.reason === 'ALREADY_SHARED') {
+                    return interaction.editReply(`ℹ️ <@${target.id}> hat deine Custom-Rolle bereits.`);
+                }
+                if (addRes.reason === 'NO_CUSTOM_ROLE') {
+                    return interaction.editReply('❌ Du hast noch keine Custom-Rolle. Nutze zuerst `/customrole add`.');
+                }
+                return interaction.editReply('❌ Konnte Sharing nicht speichern.');
+            }
+
+            // Danach Rolle geben (best effort rollback, falls add fehlschlägt ist vorher schon returned)
+            try {
+                await targetMember.roles.add(role, `Shared custom role from ${interaction.user.id}`);
+            } catch (err) {
+                // Rollback: Share wieder entfernen, damit DB nicht “lügt”
+                db.removeCustomRoleShare(interaction.user.id, target.id);
+                throw err;
+            }
+
+            // Für korrekte Anzeige: aus DB neu lesen (deduped)
+            const fresh = db.getCustomRole(interaction.user.id);
+            const freshShared = Array.isArray(fresh?.sharedWith) ? Array.from(new Set(fresh.sharedWith)) : [];
+            const used = freshShared.length;
+
+            return interaction.editReply(
+                `✅ Custom-Rolle <@&${role.id}> wurde mit <@${target.id}> geteilt. (${used}/${shareLimit})`
+            );
+        }
+
+        // -------------------------
+        // /customrole remove-customrole
+        // -------------------------
+        if (sub === 'remove-customrole') {
+            const target = interaction.options.getUser('user', true);
+
+            const rec = db.getCustomRole(interaction.user.id);
+            const sharedWith = Array.isArray(rec?.sharedWith) ? rec.sharedWith : [];
+
+            if (!sharedWith.includes(target.id)) {
+                return interaction.editReply(`ℹ️ <@${target.id}> hat deine Custom-Rolle nicht (oder ist nicht mehr geteilt).`);
+            }
+
+            const targetMember = await interaction.guild.members.fetch(target.id).catch(() => null);
+            if (targetMember && targetMember.roles.cache.has(role.id)) {
+                await targetMember.roles
+                    .remove(role, `Unshared custom role from ${interaction.user.id}`)
+                    .catch(() => { });
+            }
+
+            db.removeCustomRoleShare(interaction.user.id, target.id);
+
+            return interaction.editReply(`✅ Sharing entfernt: <@${target.id}> hat die Rolle <@&${role.id}> nicht mehr.`);
         }
 
         // Fallback (sollte nie passieren)

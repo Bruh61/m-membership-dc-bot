@@ -14,8 +14,19 @@
   },
   "customRoleAllowedTiers": ["silver", "gold", "diamond"],
   "customRole": {
-    "anchorRoleId": "1364963140898652272",
+    "anchorRoleIdsByTier": {
+      "silver": "1465617712830087179",
+      "gold": "1465617820497743903",
+      "diamond": "1465617904858038468"
+    },
     "namePrefix": "",
     "deleteRoleOnRevoke": true
+  },
+  "customRoleSharing": {
+    "eligibleTiers": ["gold", "diamond"],
+    "maxSharesByTier": {
+      "gold": 3,
+      "diamond": 5
+    }
   }
 }

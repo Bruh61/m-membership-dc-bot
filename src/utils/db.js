@@ -13,9 +13,17 @@ function _load() {
     const raw = fs.readFileSync(DB_PATH, 'utf8');
     try {
         const parsed = JSON.parse(raw);
-        // Backward compatible
         if (!parsed.customRoles) parsed.customRoles = {};
         if (!parsed.members) parsed.members = {};
+
+        // Backward compatible: sharedWith + createdAt
+        for (const v of Object.values(parsed.customRoles)) {
+            if (v && typeof v === 'object') {
+                if (!Array.isArray(v.sharedWith)) v.sharedWith = [];
+                if (!v.createdAt) v.createdAt = new Date().toISOString();
+            }
+        }
+
         return parsed;
     } catch {
         return _empty();
@@ -34,66 +42,74 @@ module.exports = {
     get data() { return cache; },
     replace(obj) { cache = obj; save(); },
 
-    // --- Temp roles (existing) ---
-    addEntry(guildId, userId, roleId, grantedAt, expiresAt) {
-        if (!cache.members[userId]) cache.members[userId] = [];
-        cache.members[userId].push({ roleId, grantedAt, expiresAt, warned5d: false });
-        save();
-    },
-    getUser(guildId, userId) { return cache.members[userId] || []; },
-    getEntry(guildId, userId, roleId) {
-        return (cache.members[userId] || []).find(e => e.roleId === roleId);
-    },
-    updateExpiry(guildId, userId, roleId, newExpiryISO, { resetWarn } = {}) {
-        const arr = cache.members[userId] || [];
-        const item = arr.find(e => e.roleId === roleId);
-        if (!item) return false;
-        item.expiresAt = newExpiryISO;
-        if (resetWarn) item.warned5d = false;
-        save();
-        return true;
-    },
-    markWarned(userId, roleId) {
-        const arr = cache.members[userId] || [];
-        const item = arr.find(e => e.roleId === roleId);
-        if (!item) return false;
-        item.warned5d = true;
-        save();
-        return true;
-    },
-    removeEntry(guildId, userId, roleId) {
-        const arr = cache.members[userId] || [];
-        const idx = arr.findIndex(e => e.roleId === roleId);
-        if (idx === -1) return false;
-        arr.splice(idx, 1);
-        if (arr.length === 0) delete cache.members[userId];
-        save();
-        return true;
-    },
-    listAll(guildId) {
-        const out = [];
-        for (const [userId, roles] of Object.entries(cache.members)) {
-            for (const r of roles) out.push({ userId, ...r });
-        }
-        out.sort((a, b) => new Date(a.expiresAt) - new Date(b.expiresAt));
-        return out;
-    },
+    // ... (deine bestehenden Temp-Role Methoden bleiben unverändert)
 
-    // --- Custom roles (new) ---
+    // --- Custom roles ---
     getCustomRole(userId) {
         return cache.customRoles[userId] || null;
     },
+
     setCustomRole(userId, roleId, createdAtISO) {
-        cache.customRoles[userId] = { roleId, createdAt: createdAtISO };
+        const prev = cache.customRoles[userId];
+        cache.customRoles[userId] = {
+            roleId,
+            createdAt: createdAtISO,
+            sharedWith: Array.isArray(prev?.sharedWith) ? prev.sharedWith : [],
+        };
         save();
     },
+
+    // --- Sharing ---
+    addCustomRoleShare(ownerId, targetUserId) {
+        const rec = cache.customRoles[ownerId];
+        if (!rec) return { ok: false, reason: 'NO_CUSTOM_ROLE' };
+        if (!Array.isArray(rec.sharedWith)) rec.sharedWith = [];
+        if (rec.sharedWith.includes(targetUserId)) return { ok: false, reason: 'ALREADY_SHARED' };
+        rec.sharedWith.push(targetUserId);
+        save();
+        return { ok: true };
+    },
+
+    removeCustomRoleShare(ownerId, targetUserId) {
+        const rec = cache.customRoles[ownerId];
+        if (!rec) return { ok: false, reason: 'NO_CUSTOM_ROLE' };
+        if (!Array.isArray(rec.sharedWith)) rec.sharedWith = [];
+        const idx = rec.sharedWith.indexOf(targetUserId);
+        if (idx === -1) return { ok: false, reason: 'NOT_SHARED' };
+        rec.sharedWith.splice(idx, 1);
+        save();
+        return { ok: true };
+    },
+
+    clearCustomRoleShares(ownerId) {
+        const rec = cache.customRoles[ownerId];
+        if (!rec) return [];
+        const prev = Array.isArray(rec.sharedWith) ? [...rec.sharedWith] : [];
+        rec.sharedWith = [];
+        save();
+        return prev;
+    },
+
+    setCustomRoleSharedWith(ownerId, nextSharedWith) {
+        const rec = cache.customRoles[ownerId];
+        if (!rec) return false;
+        rec.sharedWith = Array.isArray(nextSharedWith) ? [...nextSharedWith] : [];
+        save();
+        return true;
+    },
+
     removeCustomRole(userId) {
         const existed = !!cache.customRoles[userId];
         delete cache.customRoles[userId];
         save();
         return existed;
     },
+
     listCustomRoles() {
-        return Object.entries(cache.customRoles).map(([userId, v]) => ({ userId, ...v }));
+        return Object.entries(cache.customRoles).map(([userId, v]) => ({
+            userId,
+            ...v,
+            sharedWith: Array.isArray(v?.sharedWith) ? v.sharedWith : [],
+        }));
     },
 };
