@@ -112,4 +112,35 @@ module.exports = {
             sharedWith: Array.isArray(v?.sharedWith) ? v.sharedWith : [],
         }));
     },
+    // --- TempRole Warn-Flags ---
+    markWarned(userId, roleId) {
+        const list = cache.members?.[userId];
+        if (!Array.isArray(list)) return false;
+
+        const entry = list.find(r => r.roleId === roleId);
+        if (!entry) return false;
+
+        entry.warned5d = true;
+        save();
+        return true;
+    },
+    // --- Temp roles ---
+    removeEntry(guildId, userId, roleId) {
+        const list = cache.members?.[userId];
+        if (!Array.isArray(list)) return false;
+
+        const before = list.length;
+        cache.members[userId] = list.filter(r => r.roleId !== roleId);
+
+        if (cache.members[userId].length === 0) {
+            delete cache.members[userId];
+        }
+
+        if (before !== cache.members[userId]?.length) {
+            save();
+            return true;
+        }
+
+        return false;
+    },
 };

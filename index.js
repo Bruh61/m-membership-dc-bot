@@ -124,24 +124,23 @@ client.once('ready', async () => {
     setInterval(() => sendFiveDayWarnings(client).catch(console.error), 60 * 60 * 1000);
 });
 
-// Hilfsfunktion: Einträge für Pagination (Fallback wenn wir keine buildPage-Utility brauchen)
-function loadEntriesFromJson() {
-    const file = path.join(process.cwd(), 'data', 'temproles.json');
-    if (!fs.existsSync(file)) return [];
-    let json;
-    try { json = JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return []; }
-    if (!json || typeof json !== 'object' || !json.members) return [];
-    const entries = [];
-    for (const [userId, list] of Object.entries(json.members)) {
-        if (!Array.isArray(list)) continue;
-        for (const e of list) {
-            if (!e || typeof e.roleId !== 'string') continue;
-            entries.push({ userId, roleId: e.roleId, grantedAt: e.grantedAt, expiresAt: e.expiresAt });
+function loadEntriesFromDb() {
+    if (typeof db.listAll === 'function') {
+        return db.listAll(process.env.GUILD_ID);
+    }
+
+    const members = db.data.members || {};
+    const out = [];
+
+    for (const [userId, roles] of Object.entries(members)) {
+        for (const r of roles) {
+            out.push({ userId, ...r });
         }
     }
-    entries.sort((a, b) => new Date(a.expiresAt) - new Date(b.expiresAt));
-    return entries;
+
+    return out.sort((a, b) => new Date(a.expiresAt) - new Date(b.expiresAt));
 }
+
 
 client.on('interactionCreate', async (interaction) => {
     try {
@@ -208,7 +207,7 @@ client.on('interactionCreate', async (interaction) => {
                     const page = Number(parts[4]);
                     const newPage = dir === 'prev' ? page - 1 : page + 1;
 
-                    const entries = loadEntriesFromJson();
+                    const entries = loadEntriesFromDb();
                     const PAGE_SIZE = 3;
                     const totalPages = Math.max(1, Math.ceil(entries.length / PAGE_SIZE));
                     const clamped = Math.min(Math.max(newPage, 0), totalPages - 1);
