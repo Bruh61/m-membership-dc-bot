@@ -198,10 +198,14 @@ async function placeRoleBelowAnchor(guild, role, anchorRoleId) {
     const anchor = await guild.roles.fetch(anchorRoleId).catch(() => null);
     if (!anchor) throw new Error('Anchor-Rolle nicht gefunden.');
 
-    const targetPos = Math.max(1, anchor.position - 1);
-    await role.setPosition(targetPos).catch((e) => {
-        throw new Error(`Konnte Rolle nicht positionieren: ${e?.message ?? e}`);
-    });
+    const me = guild.members.me || await guild.members.fetchMe();
+
+    // Ziel: 1 unter Anchor, aber NIEMALS über dem Bot
+    const desired = Math.max(1, anchor.position - 1);
+    const maxAllowed = Math.max(1, me.roles.highest.position - 1);
+    const targetPos = Math.min(desired, maxAllowed);
+
+    await role.setPosition(targetPos, { reason: 'Place custom role below anchor (clamped)' });
 }
 
 /**

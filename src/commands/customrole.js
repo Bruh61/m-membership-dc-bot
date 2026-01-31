@@ -97,16 +97,26 @@ function getExistingCustomRole(guild, userId) {
     return guild.roles.cache.get(rec.roleId) || null;
 }
 
+function hexToInt(hex) {
+    const h = String(hex).trim().replace('#', '');
+    return parseInt(h, 16);
+}
+
 async function setRoleColors(role, color1, color2) {
-    // Mit color2: versuche Gradient (Enhanced Role Styles)
-    // Ohne color2: Solid
     if (color2) {
         try {
-            // unterstützt nicht jeder Server / nicht jede djs-Version
             await role.setColors({ primaryColor: color1, secondaryColor: color2 }, 'Set gradient colors');
             return { ok: true, note: ' (Farbverlauf aktiviert)' };
-        } catch {
-            await role.setColor(color1, 'Fallback to solid color').catch(() => { });
+        } catch (err) {
+            console.error('[customrole] setColors failed:', err?.code, err?.status, err?.message);
+
+            // Fallback SOLID – aber Fehler ebenfalls loggen, falls auch das 403 ist
+            try {
+                await role.setColor(color1, 'Fallback to solid color');
+            } catch (e2) {
+                console.error('[customrole] setColor fallback failed:', e2?.code, e2?.status, e2?.message);
+            }
+
             return { ok: false, note: ' (Farbverlauf nicht verfügbar – nur farbe1 gesetzt)' };
         }
     }
@@ -232,7 +242,7 @@ module.exports = {
                 }
                 await helpers.ensureManageable(interaction.guild, role, interaction);
 
-                const { note } = await setRoleColors(role, color1, color2);
+                const { note } = await setRoleColors(role, color1, color2, interaction.guild);
 
                 await member.roles.add(role, 'Custom role granted (membership)');
 
@@ -300,7 +310,7 @@ module.exports = {
             const color2 = color2Raw ? helpers.normalizeHexColor(color2Raw) : null;
 
             try {
-                const { note } = await setRoleColors(role, color1, color2);
+                const { note } = await setRoleColors(role, color1, color2, interaction.guild);
                 return interaction.editReply(`✅ Farben aktualisiert.${note}`);
             } catch (err) {
                 console.error('customrole change-color error:', err);
