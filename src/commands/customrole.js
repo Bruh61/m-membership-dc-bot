@@ -47,6 +47,34 @@ function getCustomRoleShareLimitSafe(cfg, tier) {
     return Number.isFinite(v) ? v : 0;
 }
 
+function hexToInt(hex) {
+    const h = String(hex).trim().replace('#', '');
+    return parseInt(h, 16);
+}
+
+async function setRoleColors(role, color1, color2) {
+    if (color2) {
+        try {
+            await role.setColors({ primaryColor: color1, secondaryColor: color2 }, 'Set gradient colors');
+            return { ok: true, note: ' (Farbverlauf aktiviert)' };
+        } catch (err) {
+            console.error('[customrole] setColors failed:', err?.code, err?.status, err?.message);
+
+            // Fallback SOLID – aber Fehler ebenfalls loggen, falls auch das 403 ist
+            try {
+                await role.setColor(color1, 'Fallback to solid color');
+            } catch (e2) {
+                console.error('[customrole] setColor fallback failed:', e2?.code, e2?.status, e2?.message);
+            }
+
+            return { ok: false, note: ' (Farbverlauf nicht verfügbar – nur farbe1 gesetzt)' };
+        }
+    }
+
+    await role.setColor(color1, 'Set solid color');
+    return { ok: true, note: '' };
+}
+
 // ---------- CustomRole record helpers ----------
 function ensureCustomRoleRecord(userId, roleId) {
     const data = db.data;
@@ -98,32 +126,26 @@ function getExistingCustomRole(guild, userId) {
     return guild.roles.cache.get(rec.roleId) || null;
 }
 
-function hexToInt(hex) {
-    const h = String(hex).trim().replace('#', '');
-    return parseInt(h, 16);
+// ---------- Gifted Silver helpers ----------
+function isGiftedSilverFeatureEnabled() {
+    return typeof helpers.isGiftedSilverEnabled === 'function'
+        ? helpers.isGiftedSilverEnabled(config)
+        : !!config?.giftedSilverTier?.enabled;
 }
 
-async function setRoleColors(role, color1, color2) {
-    if (color2) {
-        try {
-            await role.setColors({ primaryColor: color1, secondaryColor: color2 }, 'Set gradient colors');
-            return { ok: true, note: ' (Farbverlauf aktiviert)' };
-        } catch (err) {
-            console.error('[customrole] setColors failed:', err?.code, err?.status, err?.message);
+function getGiftedSilverConfigSafe() {
+    if (typeof helpers.getGiftedSilverConfig === 'function') return helpers.getGiftedSilverConfig(config);
+    return {
+        enabled: config?.giftedSilverTier?.enabled !== false,
+        eligibleTier: config?.giftedSilverTier?.eligibleTier || 'diamond',
+        maxCreditsPerOwner: Number.isFinite(config?.giftedSilverTier?.maxCreditsPerOwner) ? Math.max(1, config.giftedSilverTier.maxCreditsPerOwner) : 1,
+        allowTargetWithMembership: config?.giftedSilverTier?.allowTargetWithMembership === true,
+    };
+}
 
-            // Fallback SOLID – aber Fehler ebenfalls loggen, falls auch das 403 ist
-            try {
-                await role.setColor(color1, 'Fallback to solid color');
-            } catch (e2) {
-                console.error('[customrole] setColor fallback failed:', e2?.code, e2?.status, e2?.message);
-            }
-
-            return { ok: false, note: ' (Farbverlauf nicht verfügbar – nur farbe1 gesetzt)' };
-        }
-    }
-
-    await role.setColor(color1, 'Set solid color');
-    return { ok: true, note: '' };
+function getTierRoleIdSafe(tier) {
+    if (typeof helpers.getTierRoleId === 'function') return helpers.getTierRoleId(config, tier);
+    return config?.membershipRoleIds?.[tier] || null;
 }
 
 module.exports = {
@@ -151,7 +173,7 @@ module.exports = {
                 .addStringOption(o => o.setName('farbe1').setDescription('Farbe 1 als Hex, z.B. #ff00aa').setRequired(true))
                 .addStringOption(o => o.setName('farbe2').setDescription('Farbe 2 als Hex (optional -> Farbverlauf)').setRequired(false))
         )
-        .addSubcommand(sc => sc.setName('my-membership').setDescription('Zeigt deine Custom-Rolle und ggf. geteilte User'))
+        .addSubcommand(sc => sc.setName('my-membership').setDescription('Zeigt deine Membership & Custom-Rolle, Sharing & Gift-Silver Status'))
         .addSubcommand(sc =>
             sc
                 .setName('give-customrole')
@@ -168,6 +190,19 @@ module.exports = {
             sc
                 .setName('add-channel')
                 .setDescription('Erstellt deinen Premium-Channel (nur Diamond, 1x)')
+        )
+        // ✅ NEW: Gift Silver Tier
+        .addSubcommand(sc =>
+            sc
+                .setName('give-silver-tier')
+                .setDescription('Verschenkt 1x Silver Tier (Credit) solange du Diamond hast')
+                .addUserOption(o => o.setName('user').setDescription('User der Silver Tier bekommen soll').setRequired(true))
+        )
+        .addSubcommand(sc =>
+            sc
+                .setName('remove-silver-tier')
+                .setDescription('Entzieht dein verschenktes Silver Tier und gibt den Credit frei')
+                .addUserOption(o => o.setName('user').setDescription('User bei dem Silver entfernt werden soll').setRequired(true))
         ),
 
     async execute(interaction) {
@@ -176,16 +211,100 @@ module.exports = {
 
         const member = await interaction.guild.members.fetch(interaction.user.id);
 
-        // Berechtigung (Silver/Gold/Diamond)
+        // Berechtigung (Silver/Gold/Diamond) – gilt für das gesamte /customrole Command
         const allowedIds = getAllowedCustomRoleIdsSafe(config);
         if (typeof helpers.hasAnyMembershipRole !== 'function') {
             return interaction.editReply('❌ Interner Fehler: helpers.hasAnyMembershipRole fehlt.');
         }
         if (!helpers.hasAnyMembershipRole(member, allowedIds)) {
-            return interaction.editReply('❌ Nur Silver/Gold/Diamond dürfen Custom-Rollen verwalten.');
+            return interaction.editReply('❌ Nur Silver/Gold/Diamond dürfen diese Commands nutzen.');
         }
 
+        const tier = getMembershipTierSafe(member, config.membershipRoleIds || {});
         const bannedExtra = Array.isArray(config?.customRole?.bannedWords) ? config.customRole.bannedWords : [];
+
+        // ------------------------------------------------------------------
+        // ✅ Gifted Silver Tier: give/remove (kein CustomRole-Zwang)
+        // ------------------------------------------------------------------
+        if (sub === 'give-silver-tier' || sub === 'remove-silver-tier') {
+            if (!isGiftedSilverFeatureEnabled()) {
+                return interaction.editReply('❌ Dieses Feature ist aktuell deaktiviert.');
+            }
+
+            const gsCfg = getGiftedSilverConfigSafe();
+            const eligibleTier = gsCfg.eligibleTier || 'diamond';
+            if (tier !== eligibleTier) {
+                return interaction.editReply(`❌ Nur **${eligibleTier}** Tier darf Silver verschenken.`);
+            }
+
+            const target = interaction.options.getUser('user', true);
+            if (target.bot) return interaction.editReply('❌ Du kannst keine Membership an Bots vergeben.');
+            if (target.id === interaction.user.id) return interaction.editReply('❌ Du kannst dir selbst nichts schenken.');
+
+            const silverRoleId = getTierRoleIdSafe('silver');
+            if (!silverRoleId) return interaction.editReply('❌ Server-Konfiguration: membershipRoleIds.silver fehlt.');
+
+            const targetMember = await interaction.guild.members.fetch(target.id).catch(() => null);
+            if (!targetMember) return interaction.editReply('❌ User nicht gefunden (evtl. nicht auf dem Server).');
+
+            // remove
+            if (sub === 'remove-silver-tier') {
+                const gift = db.getGiftedSilver(interaction.user.id);
+                if (!gift?.targetId) {
+                    return interaction.editReply('ℹ️ Du hast aktuell kein Silver verschenkt (Credit ist frei).');
+                }
+                if (gift.targetId !== target.id) {
+                    return interaction.editReply(`❌ Dieser User ist nicht dein aktiver Gift-Empfänger. Aktuell: <@${gift.targetId}>`);
+                }
+
+                if (targetMember.roles.cache.has(silverRoleId)) {
+                    await targetMember.roles.remove(silverRoleId, `Gifted Silver removed by owner ${interaction.user.id}`).catch(() => { });
+                }
+                db.removeGiftedSilver(interaction.user.id);
+
+                return interaction.editReply(`✅ Silver Tier wurde bei <@${target.id}> entfernt. Dein Credit ist wieder frei.`);
+            }
+
+            // give
+            // 1) Credit check (maxCreditsPerOwner ist aktuell 1, aber future-proof)
+            const existingGift = db.getGiftedSilver(interaction.user.id);
+            if (existingGift?.targetId) {
+                return interaction.editReply(`❌ Du hast deinen Credit bereits genutzt: aktuell bekommt <@${existingGift.targetId}> Silver Tier.`);
+            }
+
+            // 2) Target darf nicht schon von jemand anderem beschenkt sein
+            const otherGift = db.findGiftedSilverByTarget(target.id);
+            if (otherGift?.ownerId) {
+                return interaction.editReply(`❌ <@${target.id}> bekommt bereits Silver Tier geschenkt (von <@${otherGift.ownerId}>).`);
+            }
+
+            // 3) Target Membership-Check (standard: darf keine Membership haben)
+            if (!gsCfg.allowTargetWithMembership) {
+                // hat irgendeine membership role? dann blocken
+                if (typeof helpers.memberHasAnyMembership === 'function') {
+                    if (helpers.memberHasAnyMembership(targetMember, config)) {
+                        return interaction.editReply('❌ Der User hat bereits eine Membership-Rolle und kann nicht beschenkt werden.');
+                    }
+                } else {
+                    // fallback: check against membershipRoleIds
+                    if (helpers.hasAnyMembershipRole(targetMember, config.membershipRoleIds || {})) {
+                        return interaction.editReply('❌ Der User hat bereits eine Membership-Rolle und kann nicht beschenkt werden.');
+                    }
+                }
+            }
+
+            // 4) Rolle geben + DB schreiben (DB zuerst? -> wir machen Role zuerst, dann DB; bei Fehler: kein dirty state)
+            await targetMember.roles.add(silverRoleId, `Gifted Silver from ${interaction.user.id}`).catch((e) => {
+                throw e;
+            });
+
+            db.setGiftedSilver(interaction.user.id, target.id);
+
+            return interaction.editReply(
+                `🎁✅ Du hast **Silver Tier** an <@${target.id}> verschenkt.\n` +
+                `Der User behält Silver solange du **${eligibleTier}** bleibst. (1 Credit genutzt)`
+            );
+        }
 
         // -------------------------
         // /customrole add
@@ -215,7 +334,6 @@ module.exports = {
             const color1 = helpers.normalizeHexColor(color1Raw);
             const color2 = color2Raw ? helpers.normalizeHexColor(color2Raw) : null;
 
-            const tier = getMembershipTierSafe(member, config.membershipRoleIds || {});
             const anchorRoleId =
                 config.customRole?.anchorRoleIdsByTier?.[tier] ??
                 config.customRole?.anchorRoleId;
@@ -248,7 +366,7 @@ module.exports = {
                 }
                 await helpers.ensureManageable(interaction.guild, role, interaction);
 
-                const { note } = await setRoleColors(role, color1, color2, interaction.guild);
+                const { note } = await setRoleColors(role, color1, color2);
 
                 await member.roles.add(role, 'Custom role granted (membership)');
 
@@ -258,8 +376,6 @@ module.exports = {
 
                 if (typeof helpers.backupAndSave === 'function') {
                     await helpers.backupAndSave();
-                } else {
-                    await db.save?.(); // fallback, falls vorhanden
                 }
 
                 return interaction.editReply(`✅ Custom-Rolle erstellt & vergeben: <@&${role.id}>${note}`);
@@ -269,24 +385,67 @@ module.exports = {
             }
         }
 
-        // Ab hier: braucht existierende Custom-Rolle
-        const role = getExistingCustomRole(interaction.guild, interaction.user.id);
-        if (!role) return interaction.editReply('❌ Du hast noch keine Custom-Rolle. Nutze zuerst `/customrole add`.');
+        // -------------------------
+        // /customrole my-membership  (CustomRole optional!)
+        // -------------------------
+        if (sub === 'my-membership') {
+            const role = getExistingCustomRole(interaction.guild, interaction.user.id);
 
-        try {
-            if (typeof helpers.ensureManageable === 'function') {
-                await helpers.ensureManageable(interaction.guild, role, interaction);
+            // Customrole sharing info (falls vorhanden)
+            const rec = getCustomRoleRecord(interaction.user.id) || db.getCustomRole(interaction.user.id);
+            const sharedWith = Array.isArray(rec?.sharedWith) ? rec.sharedWith : [];
+
+            const shareEligibleTiers = Array.isArray(config?.customRoleSharing?.eligibleTiers)
+                ? config.customRoleSharing.eligibleTiers
+                : ['gold', 'diamond'];
+
+            const shareLimit = getCustomRoleShareLimitSafe(config, tier);
+            const canShare = shareEligibleTiers.includes(tier) && shareLimit > 0;
+
+            const sharedText = sharedWith.length ? sharedWith.map(id => `<@${id}>`).join(', ') : '—';
+
+            // Gift-Silver status (nur sinnvoll bei Diamond / eligible tier)
+            let giftedLine = '';
+            if (isGiftedSilverFeatureEnabled()) {
+                const gsCfg = getGiftedSilverConfigSafe();
+                const eligibleTier = gsCfg.eligibleTier || 'diamond';
+
+                if (tier === eligibleTier) {
+                    const gift = db.getGiftedSilver(interaction.user.id);
+                    if (gift?.targetId) {
+                        giftedLine = `\n🎁 **Silver verschenkt an:** <@${gift.targetId}> (Credit genutzt)`;
+                    } else {
+                        giftedLine = `\n🎁 **Silver Gift-Credit:** frei (0/1 genutzt)`;
+                    }
+                }
             }
-        } catch {
-            return interaction.editReply('❌ Ich kann deine Custom-Rolle aktuell nicht verwalten (Rollen-Hierarchie).');
+
+            return interaction.editReply(
+                `👤 **Deine Membership:** ${tier ?? 'unbekannt'}` +
+                `\n🎭 **Deine Custom-Rolle:** ${role ? `<@&${role.id}>` : '— (keine erstellt)'}` +
+                `\n🤝 **Sharing:** ${canShare ? `aktiv (${sharedWith.length}/${shareLimit})` : 'nicht verfügbar'}` +
+                `\n📌 **Geteilt mit:** ${sharedText}` +
+                `${giftedLine}`
+            );
         }
 
-        ensureCustomRoleRecord(interaction.user.id, role.id);
+        // Ab hier: braucht existierende Custom-Rolle (rename/change-color/give-customrole/remove-customrole/add-channel checks teilweise)
+        const role = getExistingCustomRole(interaction.guild, interaction.user.id);
 
         // -------------------------
         // /customrole rename
         // -------------------------
         if (sub === 'rename') {
+            if (!role) return interaction.editReply('❌ Du hast noch keine Custom-Rolle. Nutze zuerst `/customrole add`.');
+
+            try {
+                if (typeof helpers.ensureManageable === 'function') {
+                    await helpers.ensureManageable(interaction.guild, role, interaction);
+                }
+            } catch {
+                return interaction.editReply('❌ Ich kann deine Custom-Rolle aktuell nicht verwalten (Rollen-Hierarchie).');
+            }
+
             const nameRaw = interaction.options.getString('name', true);
             const nameCheck = helpers.validateRoleName(nameRaw, { min: 2, max: 50, bannedWords: bannedExtra });
             if (!nameCheck.ok) return interaction.editReply(`❌ ${nameCheck.reason}`);
@@ -306,6 +465,16 @@ module.exports = {
         // /customrole change-color
         // -------------------------
         if (sub === 'change-color') {
+            if (!role) return interaction.editReply('❌ Du hast noch keine Custom-Rolle. Nutze zuerst `/customrole add`.');
+
+            try {
+                if (typeof helpers.ensureManageable === 'function') {
+                    await helpers.ensureManageable(interaction.guild, role, interaction);
+                }
+            } catch {
+                return interaction.editReply('❌ Ich kann deine Custom-Rolle aktuell nicht verwalten (Rollen-Hierarchie).');
+            }
+
             const color1Raw = interaction.options.getString('farbe1', true);
             const color2Raw = interaction.options.getString('farbe2', false);
 
@@ -316,7 +485,7 @@ module.exports = {
             const color2 = color2Raw ? helpers.normalizeHexColor(color2Raw) : null;
 
             try {
-                const { note } = await setRoleColors(role, color1, color2, interaction.guild);
+                const { note } = await setRoleColors(role, color1, color2);
                 return interaction.editReply(`✅ Farben aktualisiert.${note}`);
             } catch (err) {
                 console.error('customrole change-color error:', err);
@@ -325,39 +494,23 @@ module.exports = {
         }
 
         // -------------------------
-        // /customrole my-membership
-        // -------------------------
-        if (sub === 'my-membership') {
-            const tier = getMembershipTierSafe(member, config.membershipRoleIds || {});
-            const rec = getCustomRoleRecord(interaction.user.id) || db.getCustomRole(interaction.user.id);
-            const sharedWith = Array.isArray(rec?.sharedWith) ? rec.sharedWith : [];
-
-            const shareEligibleTiers = Array.isArray(config?.customRoleSharing?.eligibleTiers)
-                ? config.customRoleSharing.eligibleTiers
-                : ['gold', 'diamond'];
-
-            const shareLimit = getCustomRoleShareLimitSafe(config, tier);
-            const canShare = shareEligibleTiers.includes(tier) && shareLimit > 0;
-
-            const sharedText = sharedWith.length ? sharedWith.map(id => `<@${id}>`).join(', ') : '—';
-
-            return interaction.editReply(
-                `👤 **Deine Membership:** ${tier ?? 'unbekannt'}\n` +
-                `🎭 **Deine Custom-Rolle:** <@&${role.id}>\n` +
-                `🤝 **Sharing:** ${canShare ? `aktiv (${sharedWith.length}/${shareLimit})` : 'nicht verfügbar'}\n` +
-                `📌 **Geteilt mit:** ${sharedText}`
-            );
-        }
-
-        // -------------------------
         // /customrole give-customrole
         // -------------------------
         if (sub === 'give-customrole') {
+            if (!role) return interaction.editReply('❌ Du hast noch keine Custom-Rolle. Nutze zuerst `/customrole add`.');
+
+            try {
+                if (typeof helpers.ensureManageable === 'function') {
+                    await helpers.ensureManageable(interaction.guild, role, interaction);
+                }
+            } catch {
+                return interaction.editReply('❌ Ich kann deine Custom-Rolle aktuell nicht verwalten (Rollen-Hierarchie).');
+            }
+
             const target = interaction.options.getUser('user', true);
             if (target.id === interaction.user.id) return interaction.editReply('❌ Du kannst deine Rolle nicht mit dir selbst teilen.');
             if (target.bot) return interaction.editReply('❌ Du kannst keine Rollen an Bots teilen.');
 
-            const tier = getMembershipTierSafe(member, config.membershipRoleIds || {});
             const shareEligibleTiers = Array.isArray(config?.customRoleSharing?.eligibleTiers)
                 ? config.customRoleSharing.eligibleTiers
                 : ['gold', 'diamond'];
@@ -398,6 +551,8 @@ module.exports = {
         // /customrole remove-customrole
         // -------------------------
         if (sub === 'remove-customrole') {
+            if (!role) return interaction.editReply('❌ Du hast noch keine Custom-Rolle. Nutze zuerst `/customrole add`.');
+
             const target = interaction.options.getUser('user', true);
 
             const rec = getCustomRoleRecord(interaction.user.id) || db.getCustomRole(interaction.user.id);
@@ -417,7 +572,6 @@ module.exports = {
         }
 
         if (sub === 'add-channel') {
-            const tier = getMembershipTierSafe(member, config.membershipRoleIds || {});
             if (tier !== 'diamond') {
                 return interaction.editReply('❌ Nur Diamond Tier kann einen Premium-Channel erstellen.');
             }

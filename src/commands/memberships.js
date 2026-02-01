@@ -17,10 +17,23 @@ function getRoleIds() {
     return FALLBACK_ROLE_IDS;
 }
 
+function getGiftedSilverBenefitLine() {
+    const gs = config?.giftedSilverTier;
+    if (!gs || gs.enabled === false) return null;
+
+    const eligibleTier = gs.eligibleTier || 'diamond';
+    const credits = Number.isFinite(gs.maxCreditsPerOwner) ? Math.max(1, gs.maxCreditsPerOwner) : 1;
+
+    // Kurz & korrekt zur Logik: solange Diamond vorhanden ist, 1 Credit (oder mehr)
+    const creditText = credits === 1 ? '1 Credit' : `${credits} Credits`;
+    return `• **Schenke** einem Freund das **Silver Tier** (${creditText}) – gültig solange du **${eligibleTier}** bist`;
+}
+
 module.exports = {
     data: new SlashCommandBuilder()
         .setName('memberships')
         .setDescription('Zeigt die Membership-Rollen und ihre Vorteile'),
+
     async execute(interaction) {
         const r = getRoleIds();
 
@@ -99,6 +112,8 @@ module.exports = {
                 )
         );
 
+        const giftedSilverLine = getGiftedSilverBenefitLine();
+
         embeds.push(
             new EmbedBuilder()
                 .setTitle('💎 Diamond Tier – Ultimate Supporter')
@@ -110,7 +125,7 @@ module.exports = {
 • Alle Vorteile aus dem Gold Tier
 • Exklusiver Supreme-Sponsor Rang
 • Quadruple EXP auf RLG
-• **Schenke** einem deiner Freunde das **Silver Tier** (monatlich)
+${giftedSilverLine ? giftedSilverLine : '• (Silver verschenken aktuell deaktiviert)'}
 • Teile deine Custom-Rolle mit bis zu **4** weiteren Nutzern
 • Deine Custom-Rolle kann mit einem Custom Rollenicon versehen werden
 • Deine Custom-Rolle wird auf dem Server aufgelistet und priorisiert

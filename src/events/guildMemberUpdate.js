@@ -1,13 +1,47 @@
 // src/events/guildMemberUpdate.js
 const config = require('../../config.json');
 const db = require('../utils/db');
-const { getAllowedCustomRoleIds } = require('../utils/helpers');
+const {
+    getAllowedCustomRoleIds,
+    getTierRoleId,
+    isGiftedSilverEnabled,
+    getGiftedSilverLogChannelId,
+} = require('../utils/helpers');
 const { deletePremiumChannel } = require('../utils/premiumChannels');
 
 function toIdSet(member) {
     // oldMember kann “stale” sein – wir nehmen was da ist
     const ids = member?.roles?.cache ? [...member.roles.cache.keys()] : [];
     return new Set(ids);
+}
+
+async function revokeGiftedSilverIfAny(guild, ownerId, reason, logCh) {
+    const gift = db.getGiftedSilver(ownerId);
+    if (!gift?.targetId) return { revoked: false };
+
+    const silverRoleId = getTierRoleId(config, 'silver');
+    const targetId = gift.targetId;
+
+    // DB zuerst freigeben (damit wir nicht doppelt revoken, falls Role-Remove fehlschlägt)
+    db.removeGiftedSilver(ownerId);
+
+    if (!silverRoleId) {
+        if (logCh && logCh.isTextBased()) {
+            logCh.send(`⚠️ Gift-Silver konnte nicht entfernt werden: Silver RoleId fehlt in config. (Owner <@${ownerId}>, Target <@${targetId}>)`).catch(() => { });
+        }
+        return { revoked: true, roleRemoved: false };
+    }
+
+    const targetMember = await guild.members.fetch(targetId).catch(() => null);
+    if (targetMember && targetMember.roles.cache.has(silverRoleId)) {
+        await targetMember.roles.remove(silverRoleId, reason).catch(() => { });
+    }
+
+    if (logCh && logCh.isTextBased()) {
+        logCh.send(`🎁❌ Gift-Silver revoked: <@${ownerId}> → <@${targetId}> (Diamond verloren)`).catch(() => { });
+    }
+
+    return { revoked: true, roleRemoved: !!targetMember };
 }
 
 module.exports = {
@@ -18,8 +52,6 @@ module.exports = {
             // newMember fetchen => aktueller Zustand zuverlässig
             newMember = await newMember.fetch().catch(() => newMember);
 
-            const logCh = newMember.guild.channels.cache.get(config.logChannelId);
-
             const oldSet = toIdSet(oldMember);
             const newSet = toIdSet(newMember);
 
@@ -27,22 +59,47 @@ module.exports = {
 
             // ----------------------------------------
             // (B) Diamond verloren -> Premium Voice löschen
+            // + Gift-Silver revoke (NEW)
             // ----------------------------------------
-            const diamondId = config?.membershipRoleIds?.diamond;
+            const diamondId = getTierRoleId(config, 'diamond');
             const removedDiamond = !!diamondId && removed.includes(diamondId);
 
+            // Logging Channel (global + optional override fürs gifted feature)
+            const globalLogCh = newMember.guild.channels.cache.get(config.logChannelId);
+            const giftedLogId = getGiftedSilverLogChannelId(config);
+            const giftedLogCh = giftedLogId
+                ? newMember.guild.channels.cache.get(giftedLogId)
+                : globalLogCh;
+
             if (removedDiamond) {
+                // Premium Voice cleanup
                 const res = await deletePremiumChannel(
                     newMember.guild,
                     newMember.id,
                     'Diamond removed -> delete premium voice channel'
                 );
 
-                if (logCh && logCh.isTextBased()) {
-                    logCh.send(`🗑️ Premium-Voice gelöscht: <@${newMember.id}> (Diamond entfernt)`).catch(() => { });
+                if (globalLogCh && globalLogCh.isTextBased()) {
+                    globalLogCh.send(`🗑️ Premium-Voice gelöscht: <@${newMember.id}> (Diamond entfernt)`).catch(() => { });
                 }
 
                 console.log('[guildMemberUpdate] premiumVoice delete', { userId: newMember.id, deleted: res?.deleted });
+
+                // NEW: Gift-Silver revoke, wenn Feature aktiv
+                if (isGiftedSilverEnabled(config)) {
+                    const r = await revokeGiftedSilverIfAny(
+                        newMember.guild,
+                        newMember.id,
+                        'Owner lost Diamond -> revoke gifted Silver',
+                        giftedLogCh
+                    );
+
+                    console.log('[guildMemberUpdate] giftedSilver revoke', {
+                        ownerId: newMember.id,
+                        revoked: r?.revoked,
+                        roleRemoved: r?.roleRemoved,
+                    });
+                }
             }
 
             // ----------------------------------------
@@ -98,8 +155,8 @@ module.exports = {
             db.clearCustomRoleShares(newMember.id);
             db.removeCustomRole(newMember.id);
 
-            if (logCh && logCh.isTextBased()) {
-                logCh.send(`🧹 Custom-Rolle entfernt: <@${newMember.id}> (Silver/Gold/Diamond komplett weg)`).catch(() => { });
+            if (globalLogCh && globalLogCh.isTextBased()) {
+                globalLogCh.send(`🧹 Custom-Rolle entfernt: <@${newMember.id}> (Silver/Gold/Diamond komplett weg)`).catch(() => { });
             }
         } catch (e) {
             console.error('guildMemberUpdate error:', e);
