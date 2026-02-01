@@ -5,7 +5,12 @@ const path = require('path');
 const DB_PATH = path.join(process.cwd(), 'data', 'temproles.json');
 
 function _empty() {
-    return { guildId: process.env.GUILD_ID, members: {}, customRoles: {} };
+    return {
+        guildId: process.env.GUILD_ID,
+        members: {},
+        customRoles: {},
+        premiumChannels: {}
+    };
 }
 
 function _load() {
@@ -15,6 +20,7 @@ function _load() {
         const parsed = JSON.parse(raw);
         if (!parsed.customRoles) parsed.customRoles = {};
         if (!parsed.members) parsed.members = {};
+        if (!parsed.premiumChannels) parsed.premiumChannels = {};
 
         // Backward compatible: sharedWith + createdAt
         for (const v of Object.values(parsed.customRoles)) {
@@ -143,4 +149,31 @@ module.exports = {
 
         return false;
     },
+    // --- Premium Channels (Diamond perk) ---
+    getPremiumChannel(userId) {
+        return cache.premiumChannels?.[userId] || null;
+    },
+
+    setPremiumChannel(userId, channelId) {
+        if (!cache.premiumChannels) cache.premiumChannels = {};
+        cache.premiumChannels[userId] = { channelId, createdAt: new Date().toISOString() };
+        save();
+    },
+
+    removePremiumChannel(userId) {
+        const existed = !!cache.premiumChannels?.[userId];
+        if (cache.premiumChannels) delete cache.premiumChannels[userId];
+        save();
+        return existed;
+    },
+
+    listPremiumChannels() {
+        const map = cache.premiumChannels || {};
+        return Object.entries(map).map(([userId, v]) => ({
+            userId,
+            channelId: v?.channelId,
+            createdAt: v?.createdAt
+        }));
+    },
+
 };

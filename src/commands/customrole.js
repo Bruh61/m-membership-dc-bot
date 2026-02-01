@@ -3,6 +3,7 @@ const { SlashCommandBuilder, PermissionsBitField, MessageFlags } = require('disc
 const config = require('../../config.json');
 const db = require('../utils/db');
 const helpers = require('../utils/helpers');
+const { createPremiumChannel } = require('../utils/premiumChannels');
 
 // ---------- helpers wrapper (best practice: robust, keine doppelten identifiers) ----------
 function getAllowedCustomRoleIdsSafe(cfg) {
@@ -162,6 +163,11 @@ module.exports = {
                 .setName('remove-customrole')
                 .setDescription('Entfernt deine geteilte Custom-Rolle bei einem User')
                 .addUserOption(o => o.setName('user').setDescription('User bei dem die Rolle entfernt wird').setRequired(true))
+        )
+        .addSubcommand(sc =>
+            sc
+                .setName('add-channel')
+                .setDescription('Erstellt deinen Premium-Channel (nur Diamond, 1x)')
         ),
 
     async execute(interaction) {
@@ -408,6 +414,26 @@ module.exports = {
 
             removeCustomRoleShare(interaction.user.id, target.id);
             return interaction.editReply(`✅ Sharing entfernt: <@${target.id}> hat die Rolle <@&${role.id}> nicht mehr.`);
+        }
+
+        if (sub === 'add-channel') {
+            const tier = getMembershipTierSafe(member, config.membershipRoleIds || {});
+            if (tier !== 'diamond') {
+                return interaction.editReply('❌ Nur Diamond Tier kann einen Premium-Channel erstellen.');
+            }
+
+            const res = await createPremiumChannel(interaction.guild, interaction.user);
+            if (!res.ok) {
+                if (res.reason === 'ALREADY_EXISTS') {
+                    return interaction.editReply(`ℹ️ Du hast bereits einen Premium-Channel: <#${res.channelId}>`);
+                }
+                if (res.reason === 'NO_CATEGORY') {
+                    return interaction.editReply('❌ Server-Konfiguration fehlt: premiumChannelCategoryId');
+                }
+                return interaction.editReply('❌ Konnte Premium-Channel nicht erstellen.');
+            }
+
+            return interaction.editReply(`✅ Premium-Voicechannel erstellt: <#${res.channel.id}>`);
         }
 
         return interaction.editReply('❌ Unbekannter Subcommand.');

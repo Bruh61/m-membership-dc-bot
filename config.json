@@ -6,6 +6,9 @@
   "backupRetention": 20,
   "timezone": "Europe/Berlin",
 
+  "premiumChannelCategoryId": "1426528755115102250",
+  "premiumChannelNamePrefix": "Premium-",
+
   "membershipRoleIds": {
     "bronze": "1354721641921511444",
     "silver": "1354723294636671226",
