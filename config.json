@@ -15,6 +15,7 @@
     "gold": "1354723681959673917",
     "diamond": "1354723814184976419"
   },
+
   "customRoleAllowedTiers": ["silver", "gold", "diamond"],
   "customRole": {
     "anchorRoleIdsByTier": {
@@ -25,11 +26,20 @@
     "namePrefix": "",
     "deleteRoleOnRevoke": true
   },
+
   "customRoleSharing": {
     "eligibleTiers": ["gold", "diamond"],
     "maxSharesByTier": {
       "gold": 3,
       "diamond": 5
     }
+  },
+
+  "giftedSilverTier": {
+    "enabled": true,
+    "eligibleTier": "diamond",
+    "maxCreditsPerOwner": 1,
+    "logChannelId": "",
+    "allowTargetWithMembership": false
   }
 }

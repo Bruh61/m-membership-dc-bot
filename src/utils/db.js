@@ -9,7 +9,8 @@ function _empty() {
         guildId: process.env.GUILD_ID,
         members: {},
         customRoles: {},
-        premiumChannels: {}
+        premiumChannels: {},
+        giftedSilver: {} // NEW: ownerId -> { targetId, grantedAt }
     };
 }
 
@@ -18,9 +19,13 @@ function _load() {
     const raw = fs.readFileSync(DB_PATH, 'utf8');
     try {
         const parsed = JSON.parse(raw);
+
         if (!parsed.customRoles) parsed.customRoles = {};
         if (!parsed.members) parsed.members = {};
         if (!parsed.premiumChannels) parsed.premiumChannels = {};
+
+        // NEW: giftedSilver storage (backward compatible)
+        if (!parsed.giftedSilver || typeof parsed.giftedSilver !== 'object') parsed.giftedSilver = {};
 
         // Backward compatible: sharedWith + createdAt
         for (const v of Object.values(parsed.customRoles)) {
@@ -28,6 +33,19 @@ function _load() {
                 if (!Array.isArray(v.sharedWith)) v.sharedWith = [];
                 if (!v.createdAt) v.createdAt = new Date().toISOString();
             }
+        }
+
+        // Backward compatible: giftedSilver records normalize
+        for (const [ownerId, rec] of Object.entries(parsed.giftedSilver)) {
+            if (!rec || typeof rec !== 'object') {
+                delete parsed.giftedSilver[ownerId];
+                continue;
+            }
+            if (typeof rec.targetId !== 'string' || !rec.targetId) {
+                delete parsed.giftedSilver[ownerId];
+                continue;
+            }
+            if (!rec.grantedAt) rec.grantedAt = new Date().toISOString();
         }
 
         return parsed;
@@ -118,6 +136,47 @@ module.exports = {
             sharedWith: Array.isArray(v?.sharedWith) ? v.sharedWith : [],
         }));
     },
+
+    // ------------------------------------------------------------------
+    // NEW: Gifted Silver (Diamond credit system)
+    // ------------------------------------------------------------------
+    getGiftedSilver(ownerId) {
+        return cache.giftedSilver?.[ownerId] || null;
+    },
+
+    setGiftedSilver(ownerId, targetId) {
+        if (!cache.giftedSilver || typeof cache.giftedSilver !== 'object') cache.giftedSilver = {};
+        cache.giftedSilver[ownerId] = {
+            targetId,
+            grantedAt: new Date().toISOString()
+        };
+        save();
+    },
+
+    removeGiftedSilver(ownerId) {
+        const existed = !!cache.giftedSilver?.[ownerId];
+        if (cache.giftedSilver) delete cache.giftedSilver[ownerId];
+        save();
+        return existed;
+    },
+
+    findGiftedSilverByTarget(targetId) {
+        const map = cache.giftedSilver || {};
+        for (const [ownerId, rec] of Object.entries(map)) {
+            if (rec?.targetId === targetId) return { ownerId, ...rec };
+        }
+        return null;
+    },
+
+    listGiftedSilver() {
+        const map = cache.giftedSilver || {};
+        return Object.entries(map).map(([ownerId, rec]) => ({
+            ownerId,
+            targetId: rec?.targetId,
+            grantedAt: rec?.grantedAt
+        }));
+    },
+
     // --- TempRole Warn-Flags ---
     markWarned(userId, roleId) {
         const list = cache.members?.[userId];
@@ -130,6 +189,7 @@ module.exports = {
         save();
         return true;
     },
+
     // --- Temp roles ---
     removeEntry(guildId, userId, roleId) {
         const list = cache.members?.[userId];
@@ -149,6 +209,7 @@ module.exports = {
 
         return false;
     },
+
     // --- Premium Channels (Diamond perk) ---
     getPremiumChannel(userId) {
         return cache.premiumChannels?.[userId] || null;
@@ -175,5 +236,4 @@ module.exports = {
             createdAt: v?.createdAt
         }));
     },
-
 };

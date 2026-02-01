@@ -7,6 +7,11 @@ const {
     getMembershipTier,
     getCustomRoleShareLimit,
     sleep,
+    // NEW
+    getTierRoleId,
+    isGiftedSilverEnabled,
+    getGiftedSilverLogChannelId,
+    getGiftedSilverConfig,
 } = require('./helpers');
 
 /**
@@ -28,6 +33,94 @@ function listTempEntriesFallback(guildId) {
     }
     out.sort((a, b) => new Date(a.expiresAt) - new Date(b.expiresAt));
     return out;
+}
+
+/**
+ * NEW: Gifted Silver cleanup (Diamond credit system)
+ * - Owner lost Diamond -> revoke gifted silver
+ * - Owner left -> cleanup + revoke best effort
+ * - Target left -> cleanup
+ * - Optionally re-add Silver if gift exists but role missing
+ */
+async function revokeInvalidGiftedSilver(client) {
+    if (!isGiftedSilverEnabled(config)) return;
+
+    const guild = await client.guilds.fetch(process.env.GUILD_ID);
+    const g = await guild.fetch();
+
+    const cfg = getGiftedSilverConfig(config);
+    const eligibleTier = cfg.eligibleTier || 'diamond';
+
+    const diamondRoleId = getTierRoleId(config, eligibleTier);
+    const silverRoleId = getTierRoleId(config, 'silver');
+
+    // Wenn IDs fehlen, können wir nichts sauber enforce'n
+    if (!diamondRoleId || !silverRoleId) return;
+
+    const logId = getGiftedSilverLogChannelId(config);
+    const logCh = logId ? g.channels.cache.get(logId) : g.channels.cache.get(config.logChannelId);
+
+    const items = typeof db.listGiftedSilver === 'function' ? db.listGiftedSilver() : [];
+
+    for (const it of items) {
+        const ownerId = it?.ownerId;
+        const targetId = it?.targetId;
+        if (!ownerId || !targetId) continue;
+
+        const owner = await g.members.fetch(ownerId).catch(() => null);
+        const target = await g.members.fetch(targetId).catch(() => null);
+
+        // Target weg -> cleanup
+        if (!target) {
+            db.removeGiftedSilver(ownerId);
+            if (logCh && logCh.isTextBased()) {
+                logCh.send(`🎁🧹 Gift-Silver DB bereinigt: Target weg (Owner <@${ownerId}>, Target <@${targetId}>)`).catch(() => { });
+            }
+            await sleep(120);
+            continue;
+        }
+
+        // Owner weg -> best effort revoke + cleanup
+        if (!owner) {
+            if (target.roles.cache.has(silverRoleId)) {
+                await target.roles.remove(silverRoleId, 'Gifted Silver cleanup: owner left').catch(() => { });
+            }
+            db.removeGiftedSilver(ownerId);
+
+            if (logCh && logCh.isTextBased()) {
+                logCh.send(`🎁❌ Gift-Silver revoked: Owner weg (Owner ${ownerId}, Target <@${targetId}>)`).catch(() => { });
+            }
+            await sleep(160);
+            continue;
+        }
+
+        // Owner hat kein Diamond mehr -> revoke + cleanup
+        const ownerHasEligible = owner.roles.cache.has(diamondRoleId);
+        if (!ownerHasEligible) {
+            if (target.roles.cache.has(silverRoleId)) {
+                await target.roles.remove(silverRoleId, 'Gifted Silver revoked: owner lost Diamond').catch(() => { });
+            }
+            db.removeGiftedSilver(ownerId);
+
+            if (logCh && logCh.isTextBased()) {
+                logCh.send(`🎁❌ Gift-Silver revoked (Scheduler): <@${ownerId}> → <@${targetId}> (Owner ohne ${eligibleTier})`).catch(() => { });
+            }
+            await sleep(160);
+            continue;
+        }
+
+        // Gift ist aktiv -> ensure Target hat Silver (stabilisieren)
+        if (!target.roles.cache.has(silverRoleId)) {
+            await target.roles.add(silverRoleId, `Gifted Silver active (Owner ${ownerId})`).catch(() => { });
+            if (logCh && logCh.isTextBased()) {
+                logCh.send(`🎁✅ Gift-Silver re-applied (Scheduler): <@${ownerId}> → <@${targetId}>`).catch(() => { });
+            }
+            await sleep(140);
+            continue;
+        }
+
+        await sleep(80);
+    }
 }
 
 /**
@@ -269,4 +362,10 @@ async function sendFiveDayWarnings(client) {
     }
 }
 
-module.exports = { revokeExpiredRoles, sendFiveDayWarnings, revokeInvalidCustomRoles };
+module.exports = {
+    revokeExpiredRoles,
+    sendFiveDayWarnings,
+    revokeInvalidCustomRoles,
+    // NEW export
+    revokeInvalidGiftedSilver,
+};

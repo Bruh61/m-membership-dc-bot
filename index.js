@@ -47,7 +47,14 @@ const {
 const config = require('./config.json');
 const db = require('./src/utils/db');
 const { ensureDirs, toUnix, ensureManageable } = require('./src/utils/helpers');
-const { revokeExpiredRoles, sendFiveDayWarnings, revokeInvalidCustomRoles } = require('./src/utils/scheduler');
+
+// ✅ NEW: revokeInvalidGiftedSilver import
+const {
+    revokeExpiredRoles,
+    sendFiveDayWarnings,
+    revokeInvalidCustomRoles,
+    revokeInvalidGiftedSilver,
+} = require('./src/utils/scheduler');
 
 // Commands, die wir programmatic aufrufen (Buttons/Modal)
 const giveCmd = require('./src/commands/give-temp-role');
@@ -117,10 +124,18 @@ client.once('ready', async () => {
     await sendFiveDayWarnings(client).catch(console.error);
     await revokeInvalidCustomRoles(client).catch(console.error);
 
+    // ✅ NEW: Gifted Silver Cleanup beim Start
+    await revokeInvalidGiftedSilver(client).catch(console.error);
+
     // 2) Regelmäßig ausführen (Fallback)
     const ms = config.checkIntervalMinutes * 60 * 1000;
+
     setInterval(() => revokeExpiredRoles(client).catch(console.error), ms);
     setInterval(() => revokeInvalidCustomRoles(client).catch(console.error), ms);
+
+    // ✅ NEW: regelmäßig Gifted Silver enforce'n
+    setInterval(() => revokeInvalidGiftedSilver(client).catch(console.error), ms);
+
     setInterval(() => sendFiveDayWarnings(client).catch(console.error), 60 * 60 * 1000);
 });
 
@@ -140,7 +155,6 @@ function loadEntriesFromDb() {
 
     return out.sort((a, b) => new Date(a.expiresAt) - new Date(b.expiresAt));
 }
-
 
 client.on('interactionCreate', async (interaction) => {
     try {

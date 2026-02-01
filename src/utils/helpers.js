@@ -227,8 +227,14 @@ function validateSchema(obj) {
     }
 
     if (obj.customRoles && typeof obj.customRoles !== 'object') return false;
+    if (obj.premiumChannels && typeof obj.premiumChannels !== 'object') return false;
+
+    // NEW: giftedSilver optional
+    if (obj.giftedSilver && typeof obj.giftedSilver !== 'object') return false;
+
     return true;
 }
+
 function getMembershipTier(member, roleIds) {
     if (!member?.roles?.cache || !roleIds || typeof roleIds !== 'object') return null;
     const order = ['diamond', 'gold', 'silver', 'bronze'];
@@ -246,6 +252,43 @@ function getCustomRoleShareLimit(cfg, tier) {
     return Math.max(0, limit);
 }
 
+// ------------------------------------------------------------------
+// NEW: Gifted Silver Tier helpers (Diamond credit system)
+// ------------------------------------------------------------------
+function getTierRoleId(cfg, tier) {
+    const id = cfg?.membershipRoleIds?.[tier];
+    return typeof id === 'string' && id ? id : null;
+}
+
+function memberHasTier(member, cfg, tier) {
+    const roleId = getTierRoleId(cfg, tier);
+    if (!roleId) return false;
+    return !!member?.roles?.cache?.has(roleId);
+}
+
+function memberHasAnyMembership(member, cfg) {
+    return hasAnyMembershipRole(member, cfg?.membershipRoleIds || {});
+}
+
+function getGiftedSilverConfig(cfg) {
+    const raw = cfg?.giftedSilverTier || {};
+    return {
+        enabled: raw.enabled !== false,
+        eligibleTier: typeof raw.eligibleTier === 'string' ? raw.eligibleTier : 'diamond',
+        maxCreditsPerOwner: Number.isFinite(raw.maxCreditsPerOwner) ? Math.max(1, raw.maxCreditsPerOwner) : 1,
+        logChannelId: typeof raw.logChannelId === 'string' ? raw.logChannelId : '',
+        allowTargetWithMembership: raw.allowTargetWithMembership === true
+    };
+}
+
+function isGiftedSilverEnabled(cfg) {
+    return getGiftedSilverConfig(cfg).enabled === true;
+}
+
+function getGiftedSilverLogChannelId(cfg) {
+    const g = getGiftedSilverConfig(cfg);
+    return g.logChannelId || cfg?.logChannelId || '';
+}
 
 module.exports = {
     ensureDirs,
@@ -271,4 +314,12 @@ module.exports = {
     getMembershipTier,
     getCustomRoleShareLimit,
     getAllowedCustomRoleIdsLocal,
+
+    // NEW exports
+    getTierRoleId,
+    memberHasTier,
+    memberHasAnyMembership,
+    getGiftedSilverConfig,
+    isGiftedSilverEnabled,
+    getGiftedSilverLogChannelId,
 };
