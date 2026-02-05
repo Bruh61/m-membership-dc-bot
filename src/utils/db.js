@@ -10,7 +10,8 @@ function _empty() {
         members: {},
         customRoles: {},
         premiumChannels: {},
-        giftedSilver: {} // NEW: ownerId -> { targetId, grantedAt }
+        giftedSilver: {}, // NEW: ownerId -> { targetId, grantedAt }
+        membershipNotices: {} // userId -> timestamp of last notice (for rate-limiting)
     };
 }
 
@@ -26,6 +27,8 @@ function _load() {
 
         // NEW: giftedSilver storage (backward compatible)
         if (!parsed.giftedSilver || typeof parsed.giftedSilver !== 'object') parsed.giftedSilver = {};
+
+        if (!parsed.membershipNotices) parsed.membershipNotices = {};
 
         // Backward compatible: sharedWith + createdAt
         for (const v of Object.values(parsed.customRoles)) {
@@ -235,5 +238,14 @@ module.exports = {
             channelId: v?.channelId,
             createdAt: v?.createdAt
         }));
+    },
+    // membership dm trigger (only once per reached tier)
+    getMembershipNoticeTier(userId) {
+        return this.data?.membershipNotices?.[userId] || null;
+    },
+    setMembershipNoticeTier(userId, tier) {
+        if (!this.data.membershipNotices) this.data.membershipNotices = {};
+        this.data.membershipNotices[userId] = tier;
+        this.replace(this.data);
     },
 };

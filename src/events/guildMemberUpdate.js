@@ -6,6 +6,7 @@ const {
     getTierRoleId,
     isGiftedSilverEnabled,
     getGiftedSilverLogChannelId,
+    getMembershipTier, // ✅ NEW
 } = require('../utils/helpers');
 const { deletePremiumChannel } = require('../utils/premiumChannels');
 
@@ -13,6 +14,99 @@ function toIdSet(member) {
     // oldMember kann “stale” sein – wir nehmen was da ist
     const ids = member?.roles?.cache ? [...member.roles.cache.keys()] : [];
     return new Set(ids);
+}
+
+function tierRank(tier) {
+    const map = { bronze: 0, silver: 1, gold: 2, diamond: 3 };
+    return map[tier] ?? 0;
+}
+
+function buildCommandsTextForTier(tier) {
+    const lines = [];
+
+    // Silver
+    lines.push('**Ab Silver Tier:**');
+    lines.push('• `/customrole add` — Erstellen deiner Customrolle');
+    lines.push('• `/customrole rename` — Umbenennen deiner Customrolle');
+    lines.push('• `/customrole change-color` — Farbe/Farbverlauf deiner Customrolle ändern');
+    lines.push('• `/customrole my-membership` — Membership-Profil anzeigen');
+
+    if (tierRank(tier) >= tierRank('gold')) {
+        lines.push('');
+        lines.push('**Ab Gold Tier:**');
+        lines.push('• `/customrole give-customrole @User` — Teile deine Customrolle');
+        lines.push('• `/customrole remove-customrole @User` — Entferne die geteilte Customrolle');
+    }
+
+    if (tierRank(tier) >= tierRank('diamond')) {
+        lines.push('');
+        lines.push('**Ab Diamond Tier:**');
+        lines.push('• `/customrole give-silver-tier @User` — Verschenke Silver Tier (1 Credit) solange du Diamond bist');
+        lines.push('• `/customrole remove-silver-tier @User` — Entziehe dein verschenktes Silver Tier (Credit frei)');
+        lines.push('• `/customrole add-channel` — Erstelle deinen privaten Premium-Sprachkanal');
+    }
+
+    return lines.join('\n');
+}
+
+async function maybeSendMembershipCommandsDM(newMember, addedRoleIds, logCh) {
+    const silverId = getTierRoleId(config, 'silver');
+    const goldId = getTierRoleId(config, 'gold');
+    const diamondId = getTierRoleId(config, 'diamond');
+
+    const triggers = [silverId, goldId, diamondId].filter(Boolean);
+
+    // Nur triggern wenn eine der drei Rollen neu dazu kam
+    const triggerAdded = addedRoleIds.some(id => triggers.includes(id));
+    if (!triggerAdded) return { sent: false, reason: 'NO_TRIGGER_ROLE_ADDED' };
+
+    // aktuelles Tier bestimmen
+    const tier = typeof getMembershipTier === 'function'
+        ? getMembershipTier(newMember, config?.membershipRoleIds || {})
+        : null;
+
+    if (!tier || tierRank(tier) < tierRank('silver')) {
+        return { sent: false, reason: 'TIER_NOT_ELIGIBLE' };
+    }
+
+    // Nur 1x pro "höchstem erreichten Tier"
+    const prev = typeof db.getMembershipNoticeTier === 'function'
+        ? db.getMembershipNoticeTier(newMember.id)
+        : null;
+
+    if (tierRank(tier) <= tierRank(prev)) {
+        return { sent: false, reason: 'ALREADY_NOTIFIED', tier, prev };
+    }
+
+    const msg =
+        `Hey ${newMember.user.username}! ✨\n` +
+        `Du hast jetzt **${tier.toUpperCase()}** – hier sind deine zusätzlichen Commands:\n\n` +
+        buildCommandsTextForTier(tier);
+
+    try {
+        await newMember.send({ content: msg });
+
+        if (typeof db.setMembershipNoticeTier === 'function') {
+            db.setMembershipNoticeTier(newMember.id, tier);
+        }
+
+        if (logCh && logCh.isTextBased()) {
+            logCh.send(`📩 Membership-Commands per DM gesendet: <@${newMember.id}> (**${tier}**)`).catch(() => { });
+        }
+
+        return { sent: true, tier };
+    } catch (e) {
+        // DMs zu: trotzdem speichern -> kein Spam bei jedem Update
+        if (typeof db.setMembershipNoticeTier === 'function') {
+            db.setMembershipNoticeTier(newMember.id, tier);
+        }
+
+        if (logCh && logCh.isTextBased()) {
+            logCh.send(`⚠️ Konnte DM nicht senden (DMs zu), aber gespeichert: <@${newMember.id}> (**${tier}**)`).catch(() => { });
+        }
+
+        return { sent: false, reason: 'DM_FAILED_BUT_RECORDED', tier };
+    }
 }
 
 async function revokeGiftedSilverIfAny(guild, ownerId, reason, logCh) {
@@ -56,13 +150,7 @@ module.exports = {
             const newSet = toIdSet(newMember);
 
             const removed = [...oldSet].filter(id => !newSet.has(id));
-
-            // ----------------------------------------
-            // (B) Diamond verloren -> Premium Voice löschen
-            // + Gift-Silver revoke (NEW)
-            // ----------------------------------------
-            const diamondId = getTierRoleId(config, 'diamond');
-            const removedDiamond = !!diamondId && removed.includes(diamondId);
+            const added = [...newSet].filter(id => !oldSet.has(id)); // ✅ NEW
 
             // Logging Channel (global + optional override fürs gifted feature)
             const globalLogCh = newMember.guild.channels.cache.get(config.logChannelId);
@@ -70,6 +158,16 @@ module.exports = {
             const giftedLogCh = giftedLogId
                 ? newMember.guild.channels.cache.get(giftedLogId)
                 : globalLogCh;
+
+            // ✅ NEW: Membership Commands DM Trigger (Silver/Gold/Diamond)
+            await maybeSendMembershipCommandsDM(newMember, added, globalLogCh);
+
+            // ----------------------------------------
+            // (B) Diamond verloren -> Premium Voice löschen
+            // + Gift-Silver revoke (NEW)
+            // ----------------------------------------
+            const diamondId = getTierRoleId(config, 'diamond');
+            const removedDiamond = !!diamondId && removed.includes(diamondId);
 
             if (removedDiamond) {
                 // Premium Voice cleanup
@@ -85,7 +183,7 @@ module.exports = {
 
                 console.log('[guildMemberUpdate] premiumVoice delete', { userId: newMember.id, deleted: res?.deleted });
 
-                // NEW: Gift-Silver revoke, wenn Feature aktiv
+                // Gift-Silver revoke, wenn Feature aktiv
                 if (isGiftedSilverEnabled(config)) {
                     const r = await revokeGiftedSilverIfAny(
                         newMember.guild,
